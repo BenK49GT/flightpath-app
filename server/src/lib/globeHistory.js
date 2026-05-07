@@ -4,6 +4,27 @@
 
 import { normalizeRawTraceToPoints } from "../../scripts/traceNormalize.mjs";
 import { ymdFromUtcMs } from "./dates.js";
+import { guessEndpoints } from "./nearestAirport.js";
+import { segmentFlights } from "./segment.js";
+
+function summarizeDay(points) {
+  const flights = segmentFlights(points, {});
+  const totalFlightSec = flights.reduce((acc, f) => acc + Math.max(0, Number(f.durationSec) || 0), 0);
+  const airportsSeen = new Map();
+
+  for (const f of flights) {
+    const { originGuess, destinationGuess } = guessEndpoints(f.points);
+    for (const ap of [originGuess, destinationGuess]) {
+      if (!ap?.code) continue;
+      if (!airportsSeen.has(ap.code)) airportsSeen.set(ap.code, ap.name || ap.code);
+    }
+  }
+
+  return {
+    totalFlightSec,
+    airportsVisited: Array.from(airportsSeen.entries()).map(([code, name]) => ({ code, name })),
+  };
+}
 
 export function globeHistoryUrl(y, m, d, folder, icaoLower, kind) {
   const ic = icaoLower.toLowerCase();
@@ -35,7 +56,16 @@ export async function fetchGlobeTraceForDay(icaoLower, ymd) {
     }
     const points = normalizeRawTraceToPoints(data);
     if (points?.length) {
-      return { ok: true, ymd, pointCount: points.length, kind, url };
+      const summary = summarizeDay(points);
+      return {
+        ok: true,
+        ymd,
+        pointCount: points.length,
+        kind,
+        url,
+        totalFlightSec: summary.totalFlightSec,
+        airportsVisited: summary.airportsVisited,
+      };
     }
   }
   return { ok: false, ymd };
@@ -55,7 +85,14 @@ export async function listGlobeDatesWithData(icaoLower, daysBack, delayMs) {
     const dayMs = startUtc - i * 86400000;
     const ymd = ymdFromUtcMs(dayMs);
     const r = await fetchGlobeTraceForDay(icaoLower, ymd);
-    if (r.ok) out.push({ date: ymd, pointCount: r.pointCount, kind: r.kind });
+    if (r.ok) {
+      out.push({
+        date: ymd,
+        totalFlightSec: r.totalFlightSec ?? 0,
+        airportsVisited: r.airportsVisited ?? [],
+        kind: r.kind,
+      });
+    }
     if (i + 1 < n) await new Promise((r2) => setTimeout(r2, wait));
   }
 
