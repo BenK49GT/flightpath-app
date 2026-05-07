@@ -208,7 +208,7 @@
     async function readJsonOrThrow(res, context) {
       const raw = await res.text();
       if (!raw) {
-        throw new Error(context + " returned an empty response. Please retry.");
+        throw new Error(context + " returned an empty response.");
       }
       try {
         return JSON.parse(raw);
@@ -335,10 +335,25 @@
         if (res.status === 429) throw new Error(data.message || "Server busy");
         if (!res.ok) throw new Error(data.message || data.error || res.statusText);
         const jobId = data.jobId;
+        let transientPollFailures = 0;
         for (;;) {
           await new Promise((r) => setTimeout(r, 1200));
-          const jr = await fetch("/api/indy/jobs/" + jobId + "?cb=" + Date.now());
-          const j = await readJsonOrThrow(jr, "Render status");
+          let jr;
+          let j;
+          try {
+            jr = await fetch("/api/indy/jobs/" + jobId + "?cb=" + Date.now());
+            j = await readJsonOrThrow(jr, "Render status");
+          } catch (pollErr) {
+            transientPollFailures += 1;
+            if (transientPollFailures <= 15) {
+              setStatus(
+                "Render is still running; waiting for server (" + transientPollFailures + " retry)…",
+              );
+              continue;
+            }
+            throw pollErr;
+          }
+          transientPollFailures = 0;
           if (!jr.ok) throw new Error(j.message || "Poll failed");
           if (j.status === "done") {
             if (!j.videoUrl) throw new Error("No video URL from server");
