@@ -149,6 +149,13 @@
           <option value="vfr">VFR Sectional</option>
           <option value="ifr">IFR Sectional (Area Low)</option>
         </select>
+        <label for="resolution" style="margin-top:0.7rem;">Resolution</label>
+        <select id="resolution">
+          <option value="480p">480p</option>
+          <option value="720p" selected>720p (free)</option>
+          <option value="1080p" disabled>1080p (paid tier soon)</option>
+          <option value="1440p" disabled>1440p (paid tier soon)</option>
+        </select>
         <button type="button" id="btnLoadDates">Find flight dates</button>
         <p class="hint">Scans the last ~120 UTC days on globe_history (takes a minute). Respect ADS-B Exchange terms.</p>
         <div id="scanBusy" class="busy-block" hidden>
@@ -182,6 +189,7 @@
     const btnLoadDates = $("btnLoadDates");
     const btnRender = $("btnRender");
     const mapTypeSel = $("mapType");
+    const resolutionSel = $("resolution");
     const datesSection = $("datesSection");
     const datesList = $("datesList");
     const msg = $("msg");
@@ -314,6 +322,7 @@
       showErr("");
       const reg = regInput.value.trim().toUpperCase();
       const mapType = mapTypeSel.value;
+      const resolution = resolutionSel.value;
       if (!selectedDate) return;
       btnRender.disabled = true;
       videoPanel.hidden = false;
@@ -329,9 +338,10 @@
         const res = await fetch("/api/indy/render", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ reg, date: selectedDate, leg: "longest", mapType }),
+          body: JSON.stringify({ reg, date: selectedDate, leg: "longest", mapType, resolution }),
         });
         const data = await readJsonOrThrow(res, "Start render");
+        if (res.status === 402) throw new Error(data.message || "Selected resolution requires paid tier");
         if (res.status === 429) throw new Error(data.message || "Server busy");
         if (!res.ok) throw new Error(data.message || data.error || res.statusText);
         const jobId = data.jobId;

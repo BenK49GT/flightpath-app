@@ -11,6 +11,7 @@
  *   node scripts/render-indy-video.mjs [--reg N49GT] [--from YYYY-MM-DD] [--to YYYY-MM-DD]
  *        [--leg longest|first|0|1|…] [--open] [--audio path/to/track.m4a|mp3|wav] [--no-music]
  *        [--output-basename indy_flight] [--map-type osm|vfr|ifr] [--max-view-miles 100]
+ *        [--resolution 480p|720p|1080p|1440p]
  *
  * --open      Windows: Explorer with the MP4 selected (paths in chat are often not clickable).
  * --audio     Mux your own file instead of the default underscore (you must have rights to use it).
@@ -35,8 +36,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
 const OUT_DIR = path.join(ROOT, "output");
 
-const W = 1920;
-const H = 1080;
+const RESOLUTION_PRESETS = {
+  "480p": { w: 854, h: 480 },
+  "720p": { w: 1280, h: 720 },
+  "1080p": { w: 1920, h: 1080 },
+  "1440p": { w: 2560, h: 1440 },
+};
 const FPS = 24;
 const DURATION_SEC = 14;
 const VIDEO_CRF = 18;
@@ -49,6 +54,11 @@ function arg(name, fallback = null) {
   if (idx === -1) return fallback;
   return process.argv[idx + 1] ?? fallback;
 }
+
+const RESOLUTION_KEY = String(arg("--resolution", "1080p") || "1080p").toLowerCase();
+const SELECTED_RESOLUTION = RESOLUTION_PRESETS[RESOLUTION_KEY] || RESOLUTION_PRESETS["1080p"];
+const W = SELECTED_RESOLUTION.w;
+const H = SELECTED_RESOLUTION.h;
 
 function sanitizeOutputBase(name) {
   const s = String(name ?? "indy_flight").replace(/[^a-zA-Z0-9._-]/g, "_");
@@ -1162,6 +1172,7 @@ async function main() {
   const hexUpper = nToHex(REG);
   const icaoLower = hexUpper.toLowerCase();
   console.error(`N-number ${REG} → ICAO24 ${hexUpper}`);
+  console.error(`Render resolution ${RESOLUTION_KEY} (${W}x${H})`);
 
   let pack = await tryScrapeTrace(icaoLower, FROM, TO);
   if (!pack) {
@@ -1465,6 +1476,7 @@ async function main() {
     musicAttribution: musicAttribution,
     fps: FPS,
     durationSec: DURATION_SEC,
+    resolution: { key: RESOLUTION_KEY, width: W, height: H },
   };
   fs.writeFileSync(path.join(OUT_DIR, `${outputBase}_meta.json`), JSON.stringify(meta, null, 2));
 

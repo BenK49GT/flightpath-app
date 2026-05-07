@@ -15,6 +15,13 @@ let runningJobId = null;
 
 const MAX_DAYS_BACK = Number(process.env.INDY_GLOBE_DAYS_BACK || 120);
 const GLOBE_DELAY_MS = Number(process.env.INDY_GLOBE_DELAY_MS || 110);
+const FREE_MAX_RESOLUTION_HEIGHT = 720;
+const RESOLUTIONS = {
+  "480p": { width: 854, height: 480 },
+  "720p": { width: 1280, height: 720 },
+  "1080p": { width: 1920, height: 1080 },
+  "1440p": { width: 2560, height: 1440 },
+};
 
 function jobVideoPath(jobId) {
   const base = `indy_web_${jobId}`;
@@ -69,10 +76,28 @@ export async function handleIndyRender(body) {
     const date = body?.date;
     const leg = (body?.leg || "longest").toLowerCase();
     const mapType = String(body?.mapType || "osm").toLowerCase();
+    const resolution = String(body?.resolution || "720p").toLowerCase();
     if (!["osm", "vfr", "ifr"].includes(mapType)) {
       return {
         status: 400,
         body: { error: "BAD_REQUEST", message: "`mapType` must be one of: osm, vfr, ifr" },
+      };
+    }
+    const resDef = RESOLUTIONS[resolution];
+    if (!resDef) {
+      return {
+        status: 400,
+        body: { error: "BAD_REQUEST", message: "`resolution` must be one of: 480p, 720p, 1080p, 1440p" },
+      };
+    }
+    if (resDef.height > FREE_MAX_RESOLUTION_HEIGHT) {
+      return {
+        status: 402,
+        body: {
+          error: "PLAN_LIMIT",
+          message: "Higher-than-720p rendering is reserved for a future paid tier.",
+          maxAllowedResolution: "720p",
+        },
       };
     }
 
@@ -111,6 +136,7 @@ export async function handleIndyRender(body) {
       date: String(date),
       leg,
       mapType,
+      resolution,
       error: null,
       outputBase,
       createdAt: Date.now(),
@@ -134,6 +160,8 @@ export async function handleIndyRender(body) {
         outputBase,
         "--map-type",
         mapType,
+        "--resolution",
+        resolution,
       ],
       {
         cwd: SERVER_ROOT,
@@ -175,6 +203,7 @@ export async function handleIndyRender(body) {
       body: {
         jobId,
         status: "running",
+        resolution,
         pollUrl: `/api/indy/jobs/${jobId}`,
         message: "Rendering video (typically 30–90s). Poll until status is done.",
       },
@@ -204,6 +233,7 @@ export async function handleIndyJob(jobId) {
     date: j.date,
     videoUrl: j.status === "done" ? `/api/indy/video/${jobId}` : null,
     mapType: j.mapType,
+    resolution: j.resolution,
   };
   if (j.error) body.error = j.error;
   return { status: 200, body };
