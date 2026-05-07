@@ -1196,8 +1196,16 @@ async function main() {
       process.exit(1);
     }
   } else if (!process.argv.includes("--no-music")) {
-    audioMuxPath = await ensureDefaultAdventureMusic();
-    showMacLeodCredit = true;
+    try {
+      audioMuxPath = await ensureDefaultAdventureMusic();
+      showMacLeodCredit = true;
+    } catch (err) {
+      console.error(
+        `Default music unavailable (${err?.message || err}). Continuing with video-only render.`,
+      );
+      audioMuxPath = null;
+      showMacLeodCredit = false;
+    }
   }
 
   let minLat = Infinity;
