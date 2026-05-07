@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: flightpath-api
+    runtime: docker
+    dockerfilePath: ./server/Dockerfile
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      # Tune as needed; smaller values reduce globe-history scan time.
+      - key: INDY_GLOBE_DAYS_BACK
+        value: 60
+      - key: INDY_GLOBE_DELAY_MS
+        value: 120

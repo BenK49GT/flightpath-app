@@ -38,6 +38,19 @@ If you **have not** run `npm install`, `npm start` still works: it serves the sa
 
 The API listens on **`0.0.0.0:8787`** so other devices on your LAN can reach it.
 
+### Free hosting (Render)
+
+This repo includes `render.yaml` + `server/Dockerfile` to deploy the API with ffmpeg on Render's free web tier.
+
+1. Push your branch to GitHub.
+2. In Render: **New +** -> **Blueprint** -> pick this repo.
+3. Keep defaults (service name `flightpath-api`) and deploy.
+4. When live, note your URL, e.g. `https://flightpath-api.onrender.com`.
+
+Notes:
+- Free Render instances spin down when idle (cold start on first request).
+- Files under `server/output/` are ephemeral in free hosting; render fresh videos as needed.
+
 Demo trace: **`N49GT`**, dates **`2026-04-24`** (one synthetic leg Sky Acres → Oxford area). After `seed-demo`, data lives at `server/data/traces/20260424_a60e67.json` (you can keep that file in git if you want clone-and-run without re-seeding).
 
 Smoke test in a browser:
@@ -66,6 +79,14 @@ npx expo start
 ```
 
 Ensure Windows Firewall allows inbound **8787** on private networks.
+
+For hosted backend (recommended for mobile use outside your LAN):
+
+```powershell
+cd C:\Users\benku\projects\flightpath-app\mobile
+$env:EXPO_PUBLIC_API_BASE = "https://flightpath-api.onrender.com"
+npx expo start
+```
 
 ### Flow
 

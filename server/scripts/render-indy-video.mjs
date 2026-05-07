@@ -65,6 +65,8 @@ const AUDIO_ARG = arg("--audio", null);
 const AUDIO_PATH = AUDIO_ARG ? String(AUDIO_ARG).trim() : null;
 const MAP_TYPE = (arg("--map-type", "osm") || "osm").trim().toLowerCase();
 const MAX_VIEW_MILES = Math.max(10, Number(arg("--max-view-miles", "100")) || 100);
+/** FAA chart rasters read better with a wider follow window (less digital punch-in). */
+const CHART_MIN_VIEW_MILES = 165;
 
 const MAP_SOURCES = {
   osm: {
@@ -81,7 +83,7 @@ const MAP_SOURCES = {
     copyright: "Federal Aviation Administration, Aeronautical Information Services",
     minZoom: 8,
     maxZoom: 12,
-    maxTiles: 240,
+    maxTiles: 1200,
   },
   ifr: {
     key: "ifr",
@@ -89,7 +91,7 @@ const MAP_SOURCES = {
     copyright: "Federal Aviation Administration, Aeronautical Information Services",
     minZoom: 7,
     maxZoom: 12,
-    maxTiles: 220,
+    maxTiles: 900,
   },
 };
 
@@ -485,6 +487,14 @@ function lonLatToWorldPx(lat, lon, z) {
   return { x, y };
 }
 
+function worldPxToLonLat(x, y, z) {
+  const s = worldSizePx(z);
+  const lon = (x / s) * 360 - 180;
+  const n = Math.PI * (1 - (2 * y) / s);
+  const lat = (180 / Math.PI) * Math.atan(Math.sinh(n));
+  return { lat, lon };
+}
+
 function pickZoom(minLat, maxLat, minLon, maxLon) {
   for (let z = 17; z >= 5; z--) {
     const c = [
@@ -535,7 +545,7 @@ async function fetchMapTile(mapType, z, x, y, destPath) {
   throw new Error(`Unsupported --map-type: ${mapType}`);
 }
 
-async function buildBasemapPng(ffmpeg, bounds, zIn, outPngPath, tileDir, mapType, mapSource) {
+async function buildBasemapPng(ffmpeg, bounds, zIn, outPngPath, tileDir, mapType, mapSource, outW, outH) {
   fs.mkdirSync(tileDir, { recursive: true });
   const { minLat, maxLat, minLon, maxLon } = bounds;
 
@@ -594,26 +604,74 @@ async function buildBasemapPng(ffmpeg, bounds, zIn, outPngPath, tileDir, mapType
     for (let tx = tx0; tx <= tx1; tx++) {
       const fp = path.join(tileDir, `t_${z}_${tx}_${ty}.png`);
       await fetchMapTile(mapType, z, tx, ty, fp);
-      await sleep(85);
+      await sleep(mapType === "osm" ? 85 : 25);
       tilePaths.push(fp);
     }
   }
 
-  const ffInputs = [];
-  for (const p of tilePaths) ffInputs.push("-i", p);
+  const LARGE_TILE_GRID = 140;
+  const mosaicPath = path.join(tileDir, `mosaic_${z}.png`);
+  if (tilePaths.length > LARGE_TILE_GRID) {
+    const rowPaths = [];
+    for (let r = 0; r < nRows; r++) {
+      const rowTilePaths = [];
+      for (let c = 0; c < nCols; c++) rowTilePaths.push(tilePaths[r * nCols + c]);
+      const rowOut = path.join(tileDir, `row_${r}.png`);
+      rowPaths.push(rowOut);
 
-  const fc = [];
-  for (let i = 0; i < tilePaths.length; i++) {
-    fc.push(`[${i}:v]scale=256:256:flags=lanczos[t${i}]`);
+      const rowInputs = [];
+      for (const p of rowTilePaths) rowInputs.push("-i", p);
+      const rowFc = [];
+      for (let i = 0; i < rowTilePaths.length; i++) rowFc.push(`[${i}:v]scale=256:256:flags=lanczos[t${i}]`);
+      const rowLabs = [];
+      for (let i = 0; i < rowTilePaths.length; i++) rowLabs.push(`[t${i}]`);
+      rowFc.push(`${rowLabs.join("")}hstack=inputs=${rowTilePaths.length}[row]`);
+
+      const rr = spawnSync(
+        ffmpeg,
+        ["-y", ...rowInputs, "-filter_complex", rowFc.join(";"), "-map", "[row]", "-frames:v", "1", "-update", "1", rowOut],
+        { stdio: "inherit" },
+      );
+      if (rr.status !== 0) throw new Error(`ffmpeg row mosaic failed (row ${r})`);
+    }
+
+    const vInputs = [];
+    for (const p of rowPaths) vInputs.push("-i", p);
+    const vFc = [];
+    for (let i = 0; i < rowPaths.length; i++) vFc.push(`[${i}:v]scale=${nCols * 256}:256:flags=lanczos[r${i}]`);
+    const vLabs = [];
+    for (let i = 0; i < rowPaths.length; i++) vLabs.push(`[r${i}]`);
+    vFc.push(`${vLabs.join("")}vstack=inputs=${rowPaths.length}[mos]`);
+    const rv = spawnSync(
+      ffmpeg,
+      ["-y", ...vInputs, "-filter_complex", vFc.join(";"), "-map", "[mos]", "-frames:v", "1", "-update", "1", mosaicPath],
+      { stdio: "inherit" },
+    );
+    if (rv.status !== 0) throw new Error("ffmpeg vertical stack mosaic failed");
+  } else {
+    const ffInputs = [];
+    for (const p of tilePaths) ffInputs.push("-i", p);
+
+    const fc = [];
+    for (let i = 0; i < tilePaths.length; i++) {
+      fc.push(`[${i}:v]scale=256:256:flags=lanczos[t${i}]`);
+    }
+    for (let r = 0; r < nRows; r++) {
+      const labs = [];
+      for (let c = 0; c < nCols; c++) labs.push(`[t${r * nCols + c}]`);
+      fc.push(`${labs.join("")}hstack=inputs=${nCols}[row${r}]`);
+    }
+    const rowLabs = [];
+    for (let r = 0; r < nRows; r++) rowLabs.push(`[row${r}]`);
+    fc.push(`${rowLabs.join("")}vstack=inputs=${nRows}[mos]`);
+
+    const rM = spawnSync(
+      ffmpeg,
+      ["-y", ...ffInputs, "-filter_complex", fc.join(";"), "-map", "[mos]", "-frames:v", "1", "-update", "1", mosaicPath],
+      { stdio: "inherit" },
+    );
+    if (rM.status !== 0) throw new Error("ffmpeg tile mosaic failed");
   }
-  for (let r = 0; r < nRows; r++) {
-    const labs = [];
-    for (let c = 0; c < nCols; c++) labs.push(`[t${r * nCols + c}]`);
-    fc.push(`${labs.join("")}hstack=inputs=${nCols}[row${r}]`);
-  }
-  const rowLabs = [];
-  for (let r = 0; r < nRows; r++) rowLabs.push(`[row${r}]`);
-  fc.push(`${rowLabs.join("")}vstack=inputs=${nRows}[mos]`);
 
   const mosaicW = nCols * 256;
   const mosaicH = nRows * 256;
@@ -626,19 +684,21 @@ async function buildBasemapPng(ffmpeg, bounds, zIn, outPngPath, tileDir, mapType
   cropW = Math.max(2, Math.min(cropW, mosaicW - cropX));
   cropH = Math.max(2, Math.min(cropH, mosaicH - cropY));
 
-  fc.push(`[mos]crop=${cropW}:${cropH}:${cropX}:${cropY}[cropped]`);
+  const fc = [];
+  fc.push(`[0:v]crop=${cropW}:${cropH}:${cropX}:${cropY}[cropped]`);
   /** FAA chart tiles are often RGBA; flatten onto warm paper so rgb24 decode is not black. */
   if (mapType === "vfr" || mapType === "ifr") {
-    fc.push(`[cropped]scale=${W}:${H}:flags=lanczos[scaled]`);
-    fc.push(`color=c=0xE8DCC8:s=${W}x${H}:r=1:d=1[chartbg]`);
+    fc.push(`[cropped]scale=${outW}:${outH}:flags=lanczos[scaled]`);
+    fc.push(`color=c=0xE8DCC8:s=${outW}x${outH}:r=1:d=1[chartbg]`);
     fc.push(`[chartbg][scaled]overlay=0:0:shortest=1:format=auto[final]`);
   } else {
-    fc.push(`[cropped]scale=${W}:${H}:flags=lanczos[final]`);
+    fc.push(`[cropped]scale=${outW}:${outH}:flags=lanczos[final]`);
   }
 
   const args = [
     "-y",
-    ...ffInputs,
+    "-i",
+    mosaicPath,
     "-filter_complex",
     fc.join(";"),
     "-map",
@@ -658,16 +718,16 @@ async function buildBasemapPng(ffmpeg, bounds, zIn, outPngPath, tileDir, mapType
   return { x0, x1, y0, y1, z };
 }
 
-function readPngRgbWithFfmpeg(ffmpeg, pngPath) {
+function readPngRgbWithFfmpeg(ffmpeg, pngPath, width, height) {
   const r = spawnSync(
     ffmpeg,
-    ["-i", pngPath, "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", `${W}x${H}`, "-"],
-    { encoding: "buffer", maxBuffer: W * H * 3 + 10_000_000 },
+    ["-i", pngPath, "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", `${width}x${height}`, "-"],
+    { encoding: "buffer", maxBuffer: width * height * 3 + 10_000_000 },
   );
-  if (r.status !== 0 || r.stdout.length < W * H * 3) {
+  if (r.status !== 0 || r.stdout.length < width * height * 3) {
     throw new Error(`decode basemap: ${r.stderr?.toString?.() || "unknown"}`);
   }
-  return Buffer.from(r.stdout.subarray(0, W * H * 3));
+  return Buffer.from(r.stdout.subarray(0, width * height * 3));
 }
 
 function hashU8(x, y, salt) {
@@ -866,13 +926,13 @@ function precomputeCameraViews(points, totalFrames, baseView, z, maxViewMiles, f
  * actually pans/zooms with the follow camera (not just the overlay graphics).
  * Uses bilinear filtering so follow-mode scaling does not look blocky/pixelated.
  */
-function projectBasemapToView(baseRgb, outBuf, baseView, activeView) {
+function projectBasemapToView(baseRgb, outBuf, baseView, activeView, baseW, baseH) {
   const baseSpanX = Math.max(1e-6, baseView.x1 - baseView.x0);
   const baseSpanY = Math.max(1e-6, baseView.y1 - baseView.y0);
   const actSpanX = Math.max(1e-6, activeView.x1 - activeView.x0);
   const actSpanY = Math.max(1e-6, activeView.y1 - activeView.y0);
-  const wm = W - 1;
-  const hm = H - 1;
+  const wm = baseW - 1;
+  const hm = baseH - 1;
 
   let dyOut = 0;
   for (let y = 0; y < H; y++) {
@@ -881,7 +941,7 @@ function projectBasemapToView(baseRgb, outBuf, baseView, activeView) {
     if (srcY < 0) srcY = 0;
     else if (srcY > hm) srcY = hm;
     const y0 = Math.floor(srcY);
-    const y1 = Math.min(H - 1, y0 + 1);
+    const y1 = Math.min(baseH - 1, y0 + 1);
     const ty = srcY - y0;
     const wy0 = 1 - ty;
     const wy1 = ty;
@@ -892,7 +952,7 @@ function projectBasemapToView(baseRgb, outBuf, baseView, activeView) {
       if (srcX < 0) srcX = 0;
       else if (srcX > wm) srcX = wm;
       const x0 = Math.floor(srcX);
-      const x1 = Math.min(W - 1, x0 + 1);
+      const x1 = Math.min(baseW - 1, x0 + 1);
       const tx = srcX - x0;
       const wx0 = 1 - tx;
       const wx1 = tx;
@@ -902,10 +962,10 @@ function projectBasemapToView(baseRgb, outBuf, baseView, activeView) {
       const w01 = wx0 * wy1;
       const w11 = wx1 * wy1;
 
-      const o00 = (y0 * W + x0) * 3;
-      const o10 = (y0 * W + x1) * 3;
-      const o01 = (y1 * W + x0) * 3;
-      const o11 = (y1 * W + x1) * 3;
+      const o00 = (y0 * baseW + x0) * 3;
+      const o10 = (y0 * baseW + x1) * 3;
+      const o01 = (y1 * baseW + x0) * 3;
+      const o11 = (y1 * baseW + x1) * 3;
 
       outBuf[dyOut] = clampU8(
         baseRgb[o00] * w00 + baseRgb[o10] * w10 + baseRgb[o01] * w01 + baseRgb[o11] * w11,
@@ -926,13 +986,13 @@ function clampU8(n) {
 }
 
 /** Warm, heavy vignette — corners fall off to brown shadow like a desk lamp on a chart. */
-function applyVignette(buf) {
+function applyVignette(buf, strength = 0.38) {
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
       const cx = x / W - 0.5;
       const cy = y / H - 0.5;
       const d = (cx * cx + cy * cy) * 4;
-      const v = 1 - 0.38 * d;
+      const v = 1 - strength * d;
       const warm = 1 + 0.06 * d;
       const i = (y * W + x) * 3;
       buf[i] = clampU8(buf[i] * v * warm + 4 * d);
@@ -943,20 +1003,18 @@ function applyVignette(buf) {
 }
 
 /** Aged chart: desaturate blues, lift to warm ivory, keep roads readable. */
-function applyParchmentGrade(buf) {
+function applyParchmentGrade(buf, mix = 0.62, sat = 0.58) {
   for (let i = 0; i < buf.length; i += 3) {
     let r = buf[i];
     let g = buf[i + 1];
     let b = buf[i + 2];
     const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-    const sat = 0.58;
     let sr = lum + (r - lum) * sat;
     let sg = lum + (g - lum) * sat;
     let sb = lum + (b - lum) * (sat * 0.82);
     let nr = sr * 1.05 + sg * 0.18 + sb * 0.04 + 10;
     let ng = sr * 0.2 + sg * 1.02 + sb * 0.06 + 8;
     let nb = sr * 0.06 + sg * 0.22 + sb * 0.78;
-    const mix = 0.62;
     r = r * (1 - mix) + nr * mix;
     g = g * (1 - mix) + ng * mix;
     b = b * (1 - mix) + nb * mix;
@@ -1040,6 +1098,8 @@ function applyFilmGrain(buf, frame, strength = 1) {
 
 function renderFrame(
   baseRgb,
+  baseW,
+  baseH,
   buf,
   points,
   progress,
@@ -1050,6 +1110,7 @@ function renderFrame(
   followEnabled,
   cameraViews,
   grainStrength,
+  styleProfile,
 ) {
   const n = points.length;
   const upto = Math.max(1, Math.min(n, Math.floor(progress * (n - 1)) + 1));
@@ -1057,12 +1118,12 @@ function renderFrame(
   const head = slice[slice.length - 1];
   const activeView = followEnabled ? cameraViews?.[frame] || followCameraView(baseView, z, maxViewMiles, head).view : baseView;
 
-  if (followEnabled) {
-    projectBasemapToView(baseRgb, buf, baseView, activeView);
+  if (followEnabled || baseW !== W || baseH !== H) {
+    projectBasemapToView(baseRgb, buf, baseView, activeView, baseW, baseH);
   } else {
     baseRgb.copy(buf, 0, 0, W * H * 3);
   }
-  applyParchmentGrade(buf);
+  applyParchmentGrade(buf, styleProfile.gradeMix, styleProfile.gradeSat);
 
   const xy = slice.map((p) => worldToScreen(p.lat, p.lon, z, activeView));
 
@@ -1074,8 +1135,8 @@ function renderFrame(
   drawPlaneIcon(buf, headXY.x, headXY.y, planeH);
 
   drawVintageMapBorder(buf);
-  applyPaperSpeckle(buf, frame);
-  applyVignette(buf);
+  if (styleProfile.speckle) applyPaperSpeckle(buf, frame);
+  applyVignette(buf, styleProfile.vignetteStrength);
   applyFilmGrain(buf, frame, grainStrength);
 }
 
@@ -1084,6 +1145,10 @@ async function main() {
   const FRAMES_DIR = path.join(OUT_DIR, `${outputBase}_frames_tmp`);
   const TILE_DIR = path.join(OUT_DIR, `${outputBase}_tiles_tmp`);
   const mapSource = MAP_SOURCES[MAP_TYPE] || MAP_SOURCES.osm;
+  const effectiveMaxViewMiles =
+    mapSource.key === "vfr" || mapSource.key === "ifr"
+      ? Math.max(MAX_VIEW_MILES, CHART_MIN_VIEW_MILES)
+      : MAX_VIEW_MILES;
 
   fs.mkdirSync(FRAMES_DIR, { recursive: true });
   fs.mkdirSync(OUT_DIR, { recursive: true });
@@ -1154,16 +1219,28 @@ async function main() {
     maxLon: maxLon + lonPad,
   };
 
-  const zGuess = Math.max(
-    mapSource.minZoom,
-    Math.min(pickZoom(bounds.minLat, bounds.maxLat, bounds.minLon, bounds.maxLon), mapSource.maxZoom),
-  );
+  const pick = pickZoom(bounds.minLat, bounds.maxLat, bounds.minLon, bounds.maxLon);
+  const chartZoomBoost = mapSource.key === "vfr" || mapSource.key === "ifr" ? 1 : 0;
+  const zGuess = Math.max(mapSource.minZoom, Math.min(pick + chartZoomBoost, mapSource.maxZoom));
   console.error(`${mapSource.label} zoom (initial) ${zGuess}`);
 
   const basemapPath = path.join(OUT_DIR, `${outputBase}_basemap.png`);
-  const view = await buildBasemapPng(ffmpeg, bounds, zGuess, basemapPath, TILE_DIR, mapSource.key, mapSource);
+  const baseMapScale = mapSource.key === "vfr" || mapSource.key === "ifr" ? 2 : 1;
+  const baseMapW = W * baseMapScale;
+  const baseMapH = H * baseMapScale;
+  const view = await buildBasemapPng(
+    ffmpeg,
+    bounds,
+    zGuess,
+    basemapPath,
+    TILE_DIR,
+    mapSource.key,
+    mapSource,
+    baseMapW,
+    baseMapH,
+  );
   const zUsed = view.z;
-  const baseRgb = readPngRgbWithFfmpeg(ffmpeg, basemapPath);
+  const baseRgb = readPngRgbWithFfmpeg(ffmpeg, basemapPath, baseMapW, baseMapH);
   try {
     fs.unlinkSync(basemapPath);
   } catch {
@@ -1171,35 +1248,49 @@ async function main() {
   }
 
   const viewRect = { x0: view.x0, x1: view.x1, y0: view.y0, y1: view.y1 };
-  const followEnabled = shouldUseFollowCamera(viewRect, zUsed, MAX_VIEW_MILES);
+  const followEnabled = shouldUseFollowCamera(viewRect, zUsed, effectiveMaxViewMiles);
   if (followEnabled) {
-    console.error(`Follow camera enabled (max view ${MAX_VIEW_MILES} miles).`);
+    console.error(`Follow camera enabled (max view ${effectiveMaxViewMiles} miles).`);
   } else {
-    console.error(`Static camera used (full leg fits within ${MAX_VIEW_MILES} miles).`);
+    console.error(`Static camera used (full leg fits within ${effectiveMaxViewMiles} miles).`);
   }
 
   const totalFrames = FPS * DURATION_SEC;
   const buf = Buffer.allocUnsafe(W * H * 3);
   const denom = Math.max(1, totalFrames - 1);
-  const cameraViews = precomputeCameraViews(points, totalFrames, viewRect, zUsed, MAX_VIEW_MILES, followEnabled);
+  const cameraViews = precomputeCameraViews(
+    points,
+    totalFrames,
+    viewRect,
+    zUsed,
+    effectiveMaxViewMiles,
+    followEnabled,
+  );
   /** Chart rasters already look “noisy”; heavy grain reads as extra pixelation. */
   const grainStrength = mapSource.key === "osm" ? 1 : 0.38;
+  const styleProfile =
+    mapSource.key === "osm"
+      ? { gradeMix: 0.62, gradeSat: 0.58, vignetteStrength: 0.38, speckle: true }
+      : { gradeMix: 0.26, gradeSat: 0.8, vignetteStrength: 0.14, speckle: false };
 
   for (let f = 0; f < totalFrames; f++) {
     const t = f / denom;
     const progress = 0.04 + t * 0.96;
     renderFrame(
       baseRgb,
+      baseMapW,
+      baseMapH,
       buf,
       points,
       progress,
       viewRect,
       zUsed,
       f,
-      MAX_VIEW_MILES,
+      effectiveMaxViewMiles,
       followEnabled,
       cameraViews,
       grainStrength,
+      styleProfile,
     );
     const ppmPath = path.join(FRAMES_DIR, `frame_${String(f + 1).padStart(4, "0")}.ppm`);
     const header = Buffer.from(`P6\n${W} ${H}\n255\n`);
@@ -1341,7 +1432,11 @@ async function main() {
     registration: REG,
     icao24: hexUpper,
     map: { provider: mapSource.label, key: mapSource.key, zoom: zUsed, copyright: mapSource.copyright },
-    camera: { mode: followEnabled ? "follow" : "static", maxViewMiles: MAX_VIEW_MILES },
+    camera: {
+      mode: followEnabled ? "follow" : "static",
+      maxViewMilesRequested: MAX_VIEW_MILES,
+      maxViewMilesEffective: effectiveMaxViewMiles,
+    },
     dataSource: pack.source,
     scrapeUrl: pack.url ?? null,
     day: pack.ymd ?? FROM,

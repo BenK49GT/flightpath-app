@@ -101,22 +101,31 @@
     }
     .busy-block[hidden] { display: none !important; }
     .progress-bar {
-      height: 6px;
-      background: #0f0c09;
-      border: 1px solid var(--border);
-      border-radius: 4px;
+      height: 12px;
+      width: 100%;
+      background: #120e0a;
+      border: 1px solid #7b654c;
+      border-radius: 999px;
       overflow: hidden;
+      box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35);
     }
     .progress-indeterminate {
       height: 100%;
-      width: 35%;
-      background: linear-gradient(90deg, var(--accent), #e85c54);
-      border-radius: 3px;
-      animation: progressSlide 1.1s ease-in-out infinite;
+      width: 45%;
+      background:
+        repeating-linear-gradient(
+          -45deg,
+          #d14a42 0px,
+          #d14a42 10px,
+          #f06c63 10px,
+          #f06c63 20px
+        );
+      border-radius: 999px;
+      animation: progressSlide 1.05s linear infinite;
     }
     @keyframes progressSlide {
-      0% { transform: translateX(-120%); }
-      100% { transform: translateX(320%); }
+      0% { transform: translateX(-130%); }
+      100% { transform: translateX(250%); }
     }
     .busy-detail {
       font-size: 0.85rem;
@@ -143,6 +152,7 @@
         <button type="button" id="btnLoadDates">Find flight dates</button>
         <p class="hint">Scans the last ~120 UTC days on globe_history (takes a minute). Respect ADS-B Exchange terms.</p>
         <div id="scanBusy" class="busy-block" hidden>
+          <p class="busy-detail">Progress</p>
           <div class="progress-bar" aria-hidden="true"><div class="progress-indeterminate"></div></div>
           <p id="scanBusyText" class="busy-detail"></p>
         </div>
@@ -159,6 +169,7 @@
     <div class="panel" id="videoPanel" hidden>
       <label>Result</label>
       <div id="renderBusy" class="busy-block" hidden>
+        <p class="busy-detail">Progress</p>
         <div class="progress-bar" aria-hidden="true"><div class="progress-indeterminate"></div></div>
         <p id="renderBusyText" class="busy-detail"></p>
       </div>
