@@ -342,9 +342,13 @@
         });
         const data = await readJsonOrThrow(res, "Start render");
         if (res.status === 402) throw new Error(data.message || "Selected resolution requires paid tier");
-        if (res.status === 429) throw new Error(data.message || "Server busy");
+        if (res.status === 429) throw new Error(data.message || "Render queue is currently full");
         if (!res.ok) throw new Error(data.message || data.error || res.statusText);
         const jobId = data.jobId;
+        if (data.status === "queued") {
+          const qp = Number(data.queuePosition) || 1;
+          setStatus("Queued for render (position " + qp + ").");
+        }
         let transientPollFailures = 0;
         for (;;) {
           await new Promise((r) => setTimeout(r, 1200));
@@ -365,6 +369,11 @@
           }
           transientPollFailures = 0;
           if (!jr.ok) throw new Error(j.message || "Poll failed");
+          if (j.status === "queued") {
+            const qp = Number(j.queuePosition) || 1;
+            setStatus("Queued for render (position " + qp + ").");
+            continue;
+          }
           if (j.status === "done") {
             if (!j.videoUrl) throw new Error("No video URL from server");
             loadVideoIntoPlayer(j.videoUrl, jobId);

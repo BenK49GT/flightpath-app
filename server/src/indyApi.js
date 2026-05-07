@@ -11,10 +11,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SERVER_ROOT = path.join(__dirname, "..");
 
 const jobs = new Map();
-let runningJobId = null;
+const pendingJobIds = [];
+let activeJobId = null;
 
 const MAX_DAYS_BACK = Number(process.env.INDY_GLOBE_DAYS_BACK || 120);
 const GLOBE_DELAY_MS = Number(process.env.INDY_GLOBE_DELAY_MS || 110);
+const MAX_PENDING_JOBS = Number(process.env.INDY_MAX_PENDING_JOBS || 25);
 const FREE_MAX_RESOLUTION_HEIGHT = 720;
 const RESOLUTIONS = {
   "480p": { width: 854, height: 480 },
@@ -26,6 +28,88 @@ const RESOLUTIONS = {
 function jobVideoPath(jobId) {
   const base = `indy_web_${jobId}`;
   return path.join(SERVER_ROOT, "output", `${base}.mp4`);
+}
+
+function launchRenderJob(jobId) {
+  const j = jobs.get(jobId);
+  if (!j) return;
+
+  activeJobId = jobId;
+  j.status = "running";
+  j.startedAt = Date.now();
+  j.error = null;
+
+  const scriptPath = path.join(SERVER_ROOT, "scripts", "render-indy-video.mjs");
+  const child = spawn(
+    process.execPath,
+    [
+      scriptPath,
+      "--reg",
+      j.registration,
+      "--from",
+      String(j.date),
+      "--to",
+      String(j.date),
+      "--leg",
+      j.leg,
+      "--output-basename",
+      j.outputBase,
+      "--map-type",
+      j.mapType,
+      "--resolution",
+      j.resolution,
+    ],
+    {
+      cwd: SERVER_ROOT,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env },
+    },
+  );
+  j.pid = child.pid ?? null;
+
+  let errBuf = "";
+  child.stderr?.on("data", (chunk) => {
+    errBuf += chunk.toString();
+    if (errBuf.length > 12000) errBuf = errBuf.slice(-12000);
+  });
+
+  child.on("error", (err) => {
+    const cur = jobs.get(jobId);
+    if (cur) {
+      cur.status = "error";
+      cur.finishedAt = Date.now();
+      cur.error = err.message || String(err);
+    }
+    if (activeJobId === jobId) activeJobId = null;
+    processQueue();
+  });
+
+  child.on("close", (code) => {
+    const cur = jobs.get(jobId);
+    if (cur) {
+      cur.finishedAt = Date.now();
+      if (code === 0 && fs.existsSync(jobVideoPath(jobId))) {
+        cur.status = "done";
+        cur.videoUrl = `/api/indy/video/${jobId}`;
+      } else {
+        cur.status = "error";
+        cur.error = errBuf.trim().slice(-4000) || `Renderer exited with code ${code}`;
+      }
+    }
+    if (activeJobId === jobId) activeJobId = null;
+    processQueue();
+  });
+}
+
+function processQueue() {
+  if (activeJobId) return;
+  while (pendingJobIds.length) {
+    const nextJobId = pendingJobIds.shift();
+    const nextJob = jobs.get(nextJobId);
+    if (!nextJob || nextJob.status !== "queued") continue;
+    launchRenderJob(nextJobId);
+    return;
+  }
 }
 
 export function getIndyVideoAbsolutePath(jobId) {
@@ -117,13 +201,13 @@ export async function handleIndyRender(body) {
     const registration = normalizeReg(String(reg));
     const ac = lookupAircraft(registration);
 
-    if (runningJobId) {
+    if (pendingJobIds.length >= MAX_PENDING_JOBS) {
       return {
         status: 429,
         body: {
-          error: "RENDER_BUSY",
-          message: "Another video is rendering; try again shortly.",
-          activeJobId: runningJobId,
+          error: "QUEUE_FULL",
+          message: "Render queue is full. Try again shortly.",
+          maxPendingJobs: MAX_PENDING_JOBS,
         },
       };
     }
@@ -131,7 +215,7 @@ export async function handleIndyRender(body) {
     const jobId = crypto.randomUUID();
     const outputBase = `indy_web_${jobId}`;
     jobs.set(jobId, {
-      status: "running",
+      status: "queued",
       registration: ac.registration,
       date: String(date),
       leg,
@@ -141,75 +225,26 @@ export async function handleIndyRender(body) {
       outputBase,
       createdAt: Date.now(),
     });
-    runningJobId = jobId;
+    pendingJobIds.push(jobId);
+    processQueue();
 
-    const scriptPath = path.join(SERVER_ROOT, "scripts", "render-indy-video.mjs");
-    const child = spawn(
-      process.execPath,
-      [
-        scriptPath,
-        "--reg",
-        ac.registration,
-        "--from",
-        String(date),
-        "--to",
-        String(date),
-        "--leg",
-        leg,
-        "--output-basename",
-        outputBase,
-        "--map-type",
-        mapType,
-        "--resolution",
-        resolution,
-      ],
-      {
-        cwd: SERVER_ROOT,
-        stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env },
-      },
-    );
-
-    let errBuf = "";
-    child.stderr?.on("data", (chunk) => {
-      errBuf += chunk.toString();
-      if (errBuf.length > 12000) errBuf = errBuf.slice(-12000);
-    });
-
-    child.on("error", (err) => {
-      runningJobId = null;
-      const j = jobs.get(jobId);
-      if (j) {
-        j.status = "error";
-        j.error = err.message || String(err);
-      }
-    });
-
-    child.on("close", (code) => {
-      runningJobId = null;
-      const j = jobs.get(jobId);
-      if (!j) return;
-      if (code === 0 && fs.existsSync(jobVideoPath(jobId))) {
-        j.status = "done";
-        j.videoUrl = `/api/indy/video/${jobId}`;
-      } else {
-        j.status = "error";
-        j.error = errBuf.trim().slice(-4000) || `Renderer exited with code ${code}`;
-      }
-    });
+    const created = jobs.get(jobId);
+    const responseBody = {
+      jobId,
+      status: created?.status || "queued",
+      resolution,
+      pollUrl: `/api/indy/jobs/${jobId}`,
+      message: "Render accepted. Poll until status is done.",
+    };
+    if (responseBody.status === "queued") {
+      responseBody.queuePosition = Math.max(0, pendingJobIds.indexOf(jobId)) + 1;
+    }
 
     return {
       status: 202,
-      body: {
-        jobId,
-        status: "running",
-        resolution,
-        pollUrl: `/api/indy/jobs/${jobId}`,
-        message: "Rendering video (typically 30–90s). Poll until status is done.",
-      },
+      body: responseBody,
     };
   } catch (e) {
-    runningJobId = null;
     if (e.code === "INVALID_REGISTRATION") {
       return { status: 400, body: { error: e.code, message: e.message } };
     }
@@ -234,7 +269,10 @@ export async function handleIndyJob(jobId) {
     videoUrl: j.status === "done" ? `/api/indy/video/${jobId}` : null,
     mapType: j.mapType,
     resolution: j.resolution,
+    activeJobId,
+    pendingJobs: pendingJobIds.length,
   };
+  if (j.status === "queued") body.queuePosition = Math.max(0, pendingJobIds.indexOf(jobId)) + 1;
   if (j.error) body.error = j.error;
   return { status: 200, body };
 }
