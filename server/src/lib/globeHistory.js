@@ -4,13 +4,19 @@
 
 import { normalizeRawTraceToPoints } from "../../scripts/traceNormalize.mjs";
 import { ymdFromUtcMs } from "./dates.js";
-import { guessEndpoints } from "./nearestAirport.js";
+import { detectVisitedAirports, guessEndpoints } from "./nearestAirport.js";
 import { segmentFlights } from "./segment.js";
 
 function summarizeDay(points) {
   const flights = segmentFlights(points, {});
   const totalFlightSec = flights.reduce((acc, f) => acc + Math.max(0, Number(f.durationSec) || 0), 0);
   const airportsSeen = new Map();
+  const routeAirports = detectVisitedAirports(points, { maxNm: 3.2, minHits: 2, sampleStride: 2 });
+
+  for (const ap of routeAirports) {
+    if (!ap?.code) continue;
+    if (!airportsSeen.has(ap.code)) airportsSeen.set(ap.code, ap.name || ap.code);
+  }
 
   for (const f of flights) {
     const { originGuess, destinationGuess } = guessEndpoints(f.points);

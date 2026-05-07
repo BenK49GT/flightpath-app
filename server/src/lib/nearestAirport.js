@@ -48,6 +48,36 @@ export function guessEndpoints(points) {
   };
 }
 
+/**
+ * Detect airports touched across a full day path by looking for repeated
+ * nearest-airport matches along the route (not just segment endpoints).
+ */
+export function detectVisitedAirports(points, opts = {}) {
+  const ap = loadAirports();
+  if (!points.length || !ap.length) return [];
+
+  const maxNm = Math.max(0.8, Number(opts.maxNm) || 3.2);
+  const minHits = Math.max(1, Number(opts.minHits) || 2);
+  const stride = Math.max(1, Number(opts.sampleStride) || 2);
+
+  const seen = new Map();
+  for (let i = 0; i < points.length; i += stride) {
+    const pt = points[i];
+    const nearest = nearestForPoint(pt, ap, maxNm);
+    if (!nearest) continue;
+    const cur = seen.get(nearest.code) || { ...nearest, hits: 0, firstIdx: i, distanceNm: nearest.distanceNm };
+    cur.hits += 1;
+    cur.firstIdx = Math.min(cur.firstIdx, i);
+    cur.distanceNm = Math.min(cur.distanceNm, nearest.distanceNm);
+    seen.set(nearest.code, cur);
+  }
+
+  return Array.from(seen.values())
+    .filter((v) => v.hits >= minHits || points.length < 24)
+    .sort((a, b) => a.firstIdx - b.firstIdx)
+    .map(({ code, name, lat, lon, distanceNm }) => ({ code, name, lat, lon, distanceNm }));
+}
+
 function sliceHead(points, max = 8) {
   return points.slice(0, Math.min(max, points.length));
 }
@@ -73,6 +103,23 @@ function nearestInSet(samplePts, airports, maxNm) {
           distanceNm: dist,
         };
       }
+    }
+  }
+  return best;
+}
+
+function nearestForPoint(pt, airports, maxNm) {
+  let best = null;
+  for (const a of airports) {
+    const dist = haversineNm(pt.lat, pt.lon, a.lat, a.lon);
+    if (dist <= maxNm && (!best || dist < best.distanceNm)) {
+      best = {
+        code: a.code,
+        name: a.name ?? a.code,
+        lat: a.lat,
+        lon: a.lon,
+        distanceNm: dist,
+      };
     }
   }
   return best;
