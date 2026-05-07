@@ -10,7 +10,7 @@
  * Usage:
  *   node scripts/render-indy-video.mjs [--reg N49GT] [--from YYYY-MM-DD] [--to YYYY-MM-DD]
  *        [--leg longest|first|0|1|…] [--open] [--audio path/to/track.m4a|mp3|wav] [--no-music]
- *        [--output-basename indy_flight] [--map-type osm|vfr|ifr]
+ *        [--output-basename indy_flight] [--map-type osm|vfr|ifr] [--max-view-miles 100]
  *
  * --open      Windows: Explorer with the MP4 selected (paths in chat are often not clickable).
  * --audio     Mux your own file instead of the default underscore (you must have rights to use it).
@@ -64,6 +64,7 @@ const OPEN_IN_OS = process.argv.includes("--open");
 const AUDIO_ARG = arg("--audio", null);
 const AUDIO_PATH = AUDIO_ARG ? String(AUDIO_ARG).trim() : null;
 const MAP_TYPE = (arg("--map-type", "osm") || "osm").trim().toLowerCase();
+const MAX_VIEW_MILES = Math.max(10, Number(arg("--max-view-miles", "100")) || 100);
 
 const MAP_SOURCES = {
   osm: {
@@ -80,7 +81,7 @@ const MAP_SOURCES = {
     copyright: "Federal Aviation Administration, Aeronautical Information Services",
     minZoom: 8,
     maxZoom: 12,
-    maxTiles: 72,
+    maxTiles: 240,
   },
   ifr: {
     key: "ifr",
@@ -88,7 +89,7 @@ const MAP_SOURCES = {
     copyright: "Federal Aviation Administration, Aeronautical Information Services",
     minZoom: 7,
     maxZoom: 12,
-    maxTiles: 64,
+    maxTiles: 220,
   },
 };
 
@@ -473,6 +474,8 @@ function worldSizePx(z) {
   return 256 * Math.pow(2, z);
 }
 
+const WEB_MERCATOR_WORLD_M = 40075016.68557849;
+
 function lonLatToWorldPx(lat, lon, z) {
   const s = worldSizePx(z);
   const x = ((lon + 180) / 360) * s;
@@ -624,7 +627,14 @@ async function buildBasemapPng(ffmpeg, bounds, zIn, outPngPath, tileDir, mapType
   cropH = Math.max(2, Math.min(cropH, mosaicH - cropY));
 
   fc.push(`[mos]crop=${cropW}:${cropH}:${cropX}:${cropY}[cropped]`);
-  fc.push(`[cropped]scale=${W}:${H}:flags=lanczos[final]`);
+  /** FAA chart tiles are often RGBA; flatten onto warm paper so rgb24 decode is not black. */
+  if (mapType === "vfr" || mapType === "ifr") {
+    fc.push(`[cropped]scale=${W}:${H}:flags=lanczos[scaled]`);
+    fc.push(`color=c=0xE8DCC8:s=${W}x${H}:r=1:d=1[chartbg]`);
+    fc.push(`[chartbg][scaled]overlay=0:0:shortest=1:format=auto[final]`);
+  } else {
+    fc.push(`[cropped]scale=${W}:${H}:flags=lanczos[final]`);
+  }
 
   const args = [
     "-y",
@@ -764,6 +774,153 @@ function worldToScreen(lat, lon, z, view) {
   };
 }
 
+function viewSpanWorldPx(view) {
+  return { w: Math.max(1e-6, view.x1 - view.x0), h: Math.max(1e-6, view.y1 - view.y0) };
+}
+
+function maxViewWorldPxAtZoom(z, miles) {
+  const meters = miles * 1609.344;
+  return (meters * worldSizePx(z)) / WEB_MERCATOR_WORLD_M;
+}
+
+function fitCameraWithinBase(baseView, capWorldPx) {
+  const base = viewSpanWorldPx(baseView);
+  let camW = Math.min(base.w, Math.max(48, capWorldPx));
+  let camH = (camW * H) / W;
+  if (camH > base.h) {
+    camH = base.h;
+    camW = (camH * W) / H;
+  }
+  return { camW, camH };
+}
+
+function shouldUseFollowCamera(baseView, z, maxViewMiles) {
+  const cap = maxViewWorldPxAtZoom(z, maxViewMiles);
+  const base = viewSpanWorldPx(baseView);
+  const fit = fitCameraWithinBase(baseView, cap);
+  return base.w > fit.camW + 1e-3 || base.h > fit.camH + 1e-3;
+}
+
+function followCameraView(baseView, z, maxViewMiles, head) {
+  const base = viewSpanWorldPx(baseView);
+  const cap = maxViewWorldPxAtZoom(z, maxViewMiles);
+  const { camW, camH } = fitCameraWithinBase(baseView, cap);
+  const needsFollow = base.w > camW + 1e-3 || base.h > camH + 1e-3;
+  if (!needsFollow) return { view: baseView, following: false };
+
+  const hp = lonLatToWorldPx(head.lat, head.lon, z);
+  let x0 = hp.x - camW / 2;
+  let y0 = hp.y - camH / 2;
+  x0 = Math.max(baseView.x0, Math.min(x0, baseView.x1 - camW));
+  y0 = Math.max(baseView.y0, Math.min(y0, baseView.y1 - camH));
+  return { view: { x0, x1: x0 + camW, y0, y1: y0 + camH }, following: true };
+}
+
+/**
+ * Build a stabilized camera path to avoid jitter on long flights.
+ * Uses a low-pass filter in world-pixel space plus a small deadband.
+ */
+function precomputeCameraViews(points, totalFrames, baseView, z, maxViewMiles, followEnabled) {
+  if (!followEnabled) return null;
+  const views = new Array(totalFrames);
+  const denom = Math.max(1, totalFrames - 1);
+
+  let last = null;
+  const alpha = 0.14;
+  const deadbandPx = 0.8;
+
+  for (let f = 0; f < totalFrames; f++) {
+    const t = f / denom;
+    const progress = 0.04 + t * 0.96;
+    const n = points.length;
+    const upto = Math.max(1, Math.min(n, Math.floor(progress * (n - 1)) + 1));
+    const head = points[upto - 1];
+    const cam = followCameraView(baseView, z, maxViewMiles, head).view;
+    const cx = (cam.x0 + cam.x1) / 2;
+    const cy = (cam.y0 + cam.y1) / 2;
+
+    if (!last) {
+      last = { cx, cy, w: cam.x1 - cam.x0, h: cam.y1 - cam.y0 };
+    } else {
+      const dx = cx - last.cx;
+      const dy = cy - last.cy;
+      if (Math.hypot(dx, dy) >= deadbandPx) {
+        last.cx += dx * alpha;
+        last.cy += dy * alpha;
+      }
+    }
+
+    let x0 = last.cx - last.w / 2;
+    let y0 = last.cy - last.h / 2;
+    x0 = Math.max(baseView.x0, Math.min(x0, baseView.x1 - last.w));
+    y0 = Math.max(baseView.y0, Math.min(y0, baseView.y1 - last.h));
+    views[f] = { x0, x1: x0 + last.w, y0, y1: y0 + last.h };
+    last.cx = x0 + last.w / 2;
+    last.cy = y0 + last.h / 2;
+  }
+  return views;
+}
+
+/**
+ * Re-sample the full-leg basemap into the active camera window so the underlay
+ * actually pans/zooms with the follow camera (not just the overlay graphics).
+ * Uses bilinear filtering so follow-mode scaling does not look blocky/pixelated.
+ */
+function projectBasemapToView(baseRgb, outBuf, baseView, activeView) {
+  const baseSpanX = Math.max(1e-6, baseView.x1 - baseView.x0);
+  const baseSpanY = Math.max(1e-6, baseView.y1 - baseView.y0);
+  const actSpanX = Math.max(1e-6, activeView.x1 - activeView.x0);
+  const actSpanY = Math.max(1e-6, activeView.y1 - activeView.y0);
+  const wm = W - 1;
+  const hm = H - 1;
+
+  let dyOut = 0;
+  for (let y = 0; y < H; y++) {
+    const wy = activeView.y0 + ((y + 0.5) / H) * actSpanY;
+    let srcY = ((wy - baseView.y0) / baseSpanY) * hm;
+    if (srcY < 0) srcY = 0;
+    else if (srcY > hm) srcY = hm;
+    const y0 = Math.floor(srcY);
+    const y1 = Math.min(H - 1, y0 + 1);
+    const ty = srcY - y0;
+    const wy0 = 1 - ty;
+    const wy1 = ty;
+
+    for (let x = 0; x < W; x++) {
+      const wx = activeView.x0 + ((x + 0.5) / W) * actSpanX;
+      let srcX = ((wx - baseView.x0) / baseSpanX) * wm;
+      if (srcX < 0) srcX = 0;
+      else if (srcX > wm) srcX = wm;
+      const x0 = Math.floor(srcX);
+      const x1 = Math.min(W - 1, x0 + 1);
+      const tx = srcX - x0;
+      const wx0 = 1 - tx;
+      const wx1 = tx;
+
+      const w00 = wx0 * wy0;
+      const w10 = wx1 * wy0;
+      const w01 = wx0 * wy1;
+      const w11 = wx1 * wy1;
+
+      const o00 = (y0 * W + x0) * 3;
+      const o10 = (y0 * W + x1) * 3;
+      const o01 = (y1 * W + x0) * 3;
+      const o11 = (y1 * W + x1) * 3;
+
+      outBuf[dyOut] = clampU8(
+        baseRgb[o00] * w00 + baseRgb[o10] * w10 + baseRgb[o01] * w01 + baseRgb[o11] * w11,
+      );
+      outBuf[dyOut + 1] = clampU8(
+        baseRgb[o00 + 1] * w00 + baseRgb[o10 + 1] * w10 + baseRgb[o01 + 1] * w01 + baseRgb[o11 + 1] * w11,
+      );
+      outBuf[dyOut + 2] = clampU8(
+        baseRgb[o00 + 2] * w00 + baseRgb[o10 + 2] * w10 + baseRgb[o01 + 2] * w01 + baseRgb[o11 + 2] * w11,
+      );
+      dyOut += 3;
+    }
+  }
+}
+
 function clampU8(n) {
   return Math.max(0, Math.min(255, n));
 }
@@ -869,10 +1026,11 @@ function drawVintageMapBorder(buf) {
   }
 }
 
-function applyFilmGrain(buf, frame) {
+function applyFilmGrain(buf, frame, strength = 1) {
+  const amp = 10 * strength;
   for (let i = 0; i < buf.length; i += 9) {
     if (hashU8(i, frame, 7) % 5 === 0) {
-      const n = (hashU8(i >> 2, frame, 9) / 255 - 0.5) * 10;
+      const n = (hashU8(i >> 2, frame, 9) / 255 - 0.5) * amp;
       buf[i] = Math.max(0, Math.min(255, buf[i] + n));
       buf[i + 1] = Math.max(0, Math.min(255, buf[i + 1] + n * 0.95));
       buf[i + 2] = Math.max(0, Math.min(255, buf[i + 2] + n * 0.9));
@@ -880,27 +1038,45 @@ function applyFilmGrain(buf, frame) {
   }
 }
 
-function renderFrame(baseRgb, buf, points, progress, view, z, frame) {
-  baseRgb.copy(buf, 0, 0, W * H * 3);
-  applyParchmentGrade(buf);
-
+function renderFrame(
+  baseRgb,
+  buf,
+  points,
+  progress,
+  baseView,
+  z,
+  frame,
+  maxViewMiles,
+  followEnabled,
+  cameraViews,
+  grainStrength,
+) {
   const n = points.length;
   const upto = Math.max(1, Math.min(n, Math.floor(progress * (n - 1)) + 1));
   const slice = points.slice(0, upto);
-  const xy = slice.map((p) => worldToScreen(p.lat, p.lon, z, view));
+  const head = slice[slice.length - 1];
+  const activeView = followEnabled ? cameraViews?.[frame] || followCameraView(baseView, z, maxViewMiles, head).view : baseView;
+
+  if (followEnabled) {
+    projectBasemapToView(baseRgb, buf, baseView, activeView);
+  } else {
+    baseRgb.copy(buf, 0, 0, W * H * 3);
+  }
+  applyParchmentGrade(buf);
+
+  const xy = slice.map((p) => worldToScreen(p.lat, p.lon, z, activeView));
 
   for (let i = 1; i < xy.length; i++) {
     drawRouteSegment(buf, xy[i - 1].x, xy[i - 1].y, xy[i].x, xy[i].y);
   }
-  const head = slice[slice.length - 1];
-  const headXY = worldToScreen(head.lat, head.lon, z, view);
-  const planeH = resolvePlaneHeadingDeg(points, upto, head, headXY, z, view);
+  const headXY = worldToScreen(head.lat, head.lon, z, activeView);
+  const planeH = resolvePlaneHeadingDeg(points, upto, head, headXY, z, activeView);
   drawPlaneIcon(buf, headXY.x, headXY.y, planeH);
 
   drawVintageMapBorder(buf);
   applyPaperSpeckle(buf, frame);
   applyVignette(buf);
-  applyFilmGrain(buf, frame);
+  applyFilmGrain(buf, frame, grainStrength);
 }
 
 async function main() {
@@ -995,15 +1171,36 @@ async function main() {
   }
 
   const viewRect = { x0: view.x0, x1: view.x1, y0: view.y0, y1: view.y1 };
+  const followEnabled = shouldUseFollowCamera(viewRect, zUsed, MAX_VIEW_MILES);
+  if (followEnabled) {
+    console.error(`Follow camera enabled (max view ${MAX_VIEW_MILES} miles).`);
+  } else {
+    console.error(`Static camera used (full leg fits within ${MAX_VIEW_MILES} miles).`);
+  }
 
   const totalFrames = FPS * DURATION_SEC;
   const buf = Buffer.allocUnsafe(W * H * 3);
   const denom = Math.max(1, totalFrames - 1);
+  const cameraViews = precomputeCameraViews(points, totalFrames, viewRect, zUsed, MAX_VIEW_MILES, followEnabled);
+  /** Chart rasters already look “noisy”; heavy grain reads as extra pixelation. */
+  const grainStrength = mapSource.key === "osm" ? 1 : 0.38;
 
   for (let f = 0; f < totalFrames; f++) {
     const t = f / denom;
     const progress = 0.04 + t * 0.96;
-    renderFrame(baseRgb, buf, points, progress, viewRect, zUsed, f);
+    renderFrame(
+      baseRgb,
+      buf,
+      points,
+      progress,
+      viewRect,
+      zUsed,
+      f,
+      MAX_VIEW_MILES,
+      followEnabled,
+      cameraViews,
+      grainStrength,
+    );
     const ppmPath = path.join(FRAMES_DIR, `frame_${String(f + 1).padStart(4, "0")}.ppm`);
     const header = Buffer.from(`P6\n${W} ${H}\n255\n`);
     fs.writeFileSync(ppmPath, Buffer.concat([header, Buffer.from(buf)]));
@@ -1144,6 +1341,7 @@ async function main() {
     registration: REG,
     icao24: hexUpper,
     map: { provider: mapSource.label, key: mapSource.key, zoom: zUsed, copyright: mapSource.copyright },
+    camera: { mode: followEnabled ? "follow" : "static", maxViewMiles: MAX_VIEW_MILES },
     dataSource: pack.source,
     scrapeUrl: pack.url ?? null,
     day: pack.ymd ?? FROM,
