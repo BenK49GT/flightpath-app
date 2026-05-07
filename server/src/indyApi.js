@@ -68,6 +68,13 @@ export async function handleIndyRender(body) {
     const reg = body?.reg ?? body?.registration;
     const date = body?.date;
     const leg = (body?.leg || "longest").toLowerCase();
+    const mapType = String(body?.mapType || "osm").toLowerCase();
+    if (!["osm", "vfr", "ifr"].includes(mapType)) {
+      return {
+        status: 400,
+        body: { error: "BAD_REQUEST", message: "`mapType` must be one of: osm, vfr, ifr" },
+      };
+    }
 
     if (!reg || !date) {
       return {
@@ -103,6 +110,7 @@ export async function handleIndyRender(body) {
       registration: ac.registration,
       date: String(date),
       leg,
+      mapType,
       error: null,
       outputBase,
       createdAt: Date.now(),
@@ -124,6 +132,8 @@ export async function handleIndyRender(body) {
         leg,
         "--output-basename",
         outputBase,
+        "--map-type",
+        mapType,
       ],
       {
         cwd: SERVER_ROOT,
@@ -193,6 +203,7 @@ export async function handleIndyJob(jobId) {
     registration: j.registration,
     date: j.date,
     videoUrl: j.status === "done" ? `/api/indy/video/${jobId}` : null,
+    mapType: j.mapType,
   };
   if (j.error) body.error = j.error;
   return { status: 200, body };

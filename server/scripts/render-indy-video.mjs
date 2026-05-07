@@ -10,7 +10,7 @@
  * Usage:
  *   node scripts/render-indy-video.mjs [--reg N49GT] [--from YYYY-MM-DD] [--to YYYY-MM-DD]
  *        [--leg longest|first|0|1|…] [--open] [--audio path/to/track.m4a|mp3|wav] [--no-music]
- *        [--output-basename indy_flight]
+ *        [--output-basename indy_flight] [--map-type osm|vfr|ifr]
  *
  * --open      Windows: Explorer with the MP4 selected (paths in chat are often not clickable).
  * --audio     Mux your own file instead of the default underscore (you must have rights to use it).
@@ -39,7 +39,7 @@ const W = 1920;
 const H = 1080;
 const FPS = 24;
 const DURATION_SEC = 14;
-const MARGIN = 56;
+const VIDEO_CRF = 18;
 const OSM_UA =
   "FlightpathIndyVideo/1.2 (flightpath local render; +https://www.openstreetmap.org/copyright)";
 const TILE_HOSTS = ["a", "b", "c"];
@@ -63,6 +63,34 @@ const LEG = (arg("--leg", "longest") || "longest").toLowerCase();
 const OPEN_IN_OS = process.argv.includes("--open");
 const AUDIO_ARG = arg("--audio", null);
 const AUDIO_PATH = AUDIO_ARG ? String(AUDIO_ARG).trim() : null;
+const MAP_TYPE = (arg("--map-type", "osm") || "osm").trim().toLowerCase();
+
+const MAP_SOURCES = {
+  osm: {
+    key: "osm",
+    label: "OpenStreetMap",
+    copyright: "https://www.openstreetmap.org/copyright",
+    minZoom: 5,
+    maxZoom: 17,
+    maxTiles: 24,
+  },
+  vfr: {
+    key: "vfr",
+    label: "FAA VFR Sectional",
+    copyright: "Federal Aviation Administration, Aeronautical Information Services",
+    minZoom: 8,
+    maxZoom: 12,
+    maxTiles: 72,
+  },
+  ifr: {
+    key: "ifr",
+    label: "FAA IFR AreaLow",
+    copyright: "Federal Aviation Administration, Aeronautical Information Services",
+    minZoom: 7,
+    maxZoom: 12,
+    maxTiles: 64,
+  },
+};
 
 /** Cinematic adventure underscore; CC BY 3.0 — attribution required (drawtext + ATTRIBUTION.txt). */
 const DEFAULT_ADVENTURE_MUSIC_URL =
@@ -484,13 +512,33 @@ async function fetchOsmTile(z, x, y, destPath) {
   fs.writeFileSync(destPath, Buffer.from(await res.arrayBuffer()));
 }
 
-async function buildBasemapPng(ffmpeg, bounds, zIn, outPngPath, tileDir) {
+async function fetchChartTile(mapType, z, x, y, destPath) {
+  const service = mapType === "vfr" ? "VFR_Sectional" : "IFR_AreaLow";
+  const url = `https://tiles.arcgis.com/tiles/ssFJjBXIUyZDrSYZ/arcgis/rest/services/${service}/MapServer/tile/${z}/${y}/${x}`;
+  const res = await fetch(url, {
+    headers: {
+      "user-agent": OSM_UA,
+      accept: "image/png,image/jpeg,*/*",
+      referer: "https://www.arcgis.com/",
+    },
+  });
+  if (!res.ok) throw new Error(`tile ${z}/${x}/${y}: HTTP ${res.status}`);
+  fs.writeFileSync(destPath, Buffer.from(await res.arrayBuffer()));
+}
+
+async function fetchMapTile(mapType, z, x, y, destPath) {
+  if (mapType === "osm") return fetchOsmTile(z, x, y, destPath);
+  if (mapType === "vfr" || mapType === "ifr") return fetchChartTile(mapType, z, x, y, destPath);
+  throw new Error(`Unsupported --map-type: ${mapType}`);
+}
+
+async function buildBasemapPng(ffmpeg, bounds, zIn, outPngPath, tileDir, mapType, mapSource) {
   fs.mkdirSync(tileDir, { recursive: true });
   const { minLat, maxLat, minLon, maxLon } = bounds;
 
-  /** Keep low so Windows argv + ffmpeg filtergraphs stay reliable. */
-  const MAX_TILES = 24;
-  let z = zIn;
+  /** Keep bounded so ffmpeg argv/filtergraph stays reliable while preserving chart detail. */
+  const MAX_TILES = Math.max(8, Number(mapSource.maxTiles) || 24);
+  let z = Math.max(mapSource.minZoom, Math.min(zIn, mapSource.maxZoom));
   let x0;
   let x1;
   let y0;
@@ -515,7 +563,9 @@ async function buildBasemapPng(ffmpeg, bounds, zIn, outPngPath, tileDir) {
     x1 = Math.max(...xs);
     y0 = Math.min(...ys);
     y1 = Math.max(...ys);
-    const pad = Math.max(x1 - x0, y1 - y0) * 0.12 + 80;
+    const padFactor = mapType === "vfr" || mapType === "ifr" ? 0.08 : 0.12;
+    const padPx = mapType === "vfr" || mapType === "ifr" ? 48 : 80;
+    const pad = Math.max(x1 - x0, y1 - y0) * padFactor + padPx;
     x0 -= pad;
     x1 += pad;
     y0 -= pad;
@@ -530,17 +580,17 @@ async function buildBasemapPng(ffmpeg, bounds, zIn, outPngPath, tileDir) {
     if (!Number.isFinite(nCols) || !Number.isFinite(nRows) || nCols < 1 || nRows < 1) {
       throw new Error(`Invalid tile grid ${nCols}x${nRows} for zoom ${z}`);
     }
-    if (nCols * nRows <= MAX_TILES || z <= 5) break;
+    if (nCols * nRows <= MAX_TILES || z <= mapSource.minZoom) break;
     z -= 1;
   }
 
-  console.error(`OSM tile grid ${nCols}x${nRows} at zoom ${z} (${nCols * nRows} tiles)`);
+  console.error(`${mapSource.label} tile grid ${nCols}x${nRows} at zoom ${z} (${nCols * nRows} tiles)`);
 
   const tilePaths = [];
   for (let ty = ty0; ty <= ty1; ty++) {
     for (let tx = tx0; tx <= tx1; tx++) {
       const fp = path.join(tileDir, `t_${z}_${tx}_${ty}.png`);
-      await fetchOsmTile(z, tx, ty, fp);
+      await fetchMapTile(mapType, z, tx, ty, fp);
       await sleep(85);
       tilePaths.push(fp);
     }
@@ -551,7 +601,7 @@ async function buildBasemapPng(ffmpeg, bounds, zIn, outPngPath, tileDir) {
 
   const fc = [];
   for (let i = 0; i < tilePaths.length; i++) {
-    fc.push(`[${i}:v]scale=256:256:flags=neighbor[t${i}]`);
+    fc.push(`[${i}:v]scale=256:256:flags=lanczos[t${i}]`);
   }
   for (let r = 0; r < nRows; r++) {
     const labs = [];
@@ -708,8 +758,9 @@ function worldToScreen(lat, lon, z, view) {
   const nx = (p.x - x0) / Math.max(x1 - x0, 1e-6);
   const ny = (p.y - y0) / Math.max(y1 - y0, 1e-6);
   return {
-    x: MARGIN + nx * (W - 2 * MARGIN),
-    y: MARGIN + ny * (H - 2 * MARGIN),
+    // Basemap is already cropped/scaled to full frame; adding synthetic margins offsets the path.
+    x: nx * W,
+    y: ny * H,
   };
 }
 
@@ -856,6 +907,7 @@ async function main() {
   const outputBase = sanitizeOutputBase(arg("--output-basename", "indy_flight"));
   const FRAMES_DIR = path.join(OUT_DIR, `${outputBase}_frames_tmp`);
   const TILE_DIR = path.join(OUT_DIR, `${outputBase}_tiles_tmp`);
+  const mapSource = MAP_SOURCES[MAP_TYPE] || MAP_SOURCES.osm;
 
   fs.mkdirSync(FRAMES_DIR, { recursive: true });
   fs.mkdirSync(OUT_DIR, { recursive: true });
@@ -926,11 +978,14 @@ async function main() {
     maxLon: maxLon + lonPad,
   };
 
-  const zGuess = pickZoom(bounds.minLat, bounds.maxLat, bounds.minLon, bounds.maxLon);
-  console.error(`OSM zoom (initial) ${zGuess}`);
+  const zGuess = Math.max(
+    mapSource.minZoom,
+    Math.min(pickZoom(bounds.minLat, bounds.maxLat, bounds.minLon, bounds.maxLon), mapSource.maxZoom),
+  );
+  console.error(`${mapSource.label} zoom (initial) ${zGuess}`);
 
   const basemapPath = path.join(OUT_DIR, `${outputBase}_basemap.png`);
-  const view = await buildBasemapPng(ffmpeg, bounds, zGuess, basemapPath, TILE_DIR);
+  const view = await buildBasemapPng(ffmpeg, bounds, zGuess, basemapPath, TILE_DIR, mapSource.key, mapSource);
   const zUsed = view.z;
   const baseRgb = readPngRgbWithFfmpeg(ffmpeg, basemapPath);
   try {
@@ -967,6 +1022,8 @@ async function main() {
       path.join(FRAMES_DIR, "frame_%04d.ppm"),
       "-c:v",
       "libx264",
+      "-crf",
+      String(VIDEO_CRF),
       "-pix_fmt",
       "yuv420p",
       "-movflags",
@@ -982,7 +1039,7 @@ async function main() {
     ? `Full cleaned path · ${points.length} pts`
     : `Leg ${legIndex + 1}/${flightsFound} · ${points.length} pts`;
   const title = `${REG}  |  ${pack.ymd ?? FROM}  |  Mode S ${hexUpper}`;
-  const sub = "Map: OpenStreetMap contributors  ·  Data: ADS-B Exchange globe_history";
+  const sub = `Map: ${mapSource.label}  ·  Data: ADS-B Exchange globe_history`;
   const esc = (s) => s.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'");
   const box = "box=1:boxcolor=0x2a1f14@0.78:boxborderw=14";
   const vfParts = [
@@ -996,14 +1053,29 @@ async function main() {
     );
   }
   vfParts.push(
-    `drawtext=fontfile='${font}':text='${esc("https://www.openstreetmap.org/copyright")}':fontcolor=0xc9b896:fontsize=15:x=56:y=h-56:${box}`,
+    `drawtext=fontfile='${font}':text='${esc(mapSource.copyright)}':fontcolor=0xc9b896:fontsize=15:x=56:y=h-56:${box}`,
     "eq=contrast=1.03:brightness=0.01:saturation=0.96",
   );
   const vf = vfParts.join(",");
 
   const r2 = spawnSync(
     ffmpeg,
-    ["-y", "-i", rawPath, "-vf", vf, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", outPath],
+    [
+      "-y",
+      "-i",
+      rawPath,
+      "-vf",
+      vf,
+      "-c:v",
+      "libx264",
+      "-crf",
+      String(VIDEO_CRF),
+      "-pix_fmt",
+      "yuv420p",
+      "-movflags",
+      "+faststart",
+      outPath,
+    ],
     { stdio: "inherit", shell: false },
   );
   if (r2.status !== 0) fs.copyFileSync(rawPath, outPath);
@@ -1071,7 +1143,7 @@ async function main() {
   const meta = {
     registration: REG,
     icao24: hexUpper,
-    map: { provider: "OpenStreetMap", zoom: zUsed, copyright: "https://www.openstreetmap.org/copyright" },
+    map: { provider: mapSource.label, key: mapSource.key, zoom: zUsed, copyright: mapSource.copyright },
     dataSource: pack.source,
     scrapeUrl: pack.url ?? null,
     day: pack.ymd ?? FROM,
