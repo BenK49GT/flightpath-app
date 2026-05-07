@@ -105,39 +105,20 @@ const MAP_SOURCES = {
   },
 };
 
-/** Cinematic adventure underscore; CC BY 3.0 — attribution required (drawtext + ATTRIBUTION.txt). */
-const DEFAULT_ADVENTURE_MUSIC_URL =
-  "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Five%20Armies.mp3";
+/** Bundled cinematic underscore shipped with the app (CC BY 3.0). */
+const BUNDLED_ADVENTURE_MUSIC = path.join(
+  ROOT,
+  "assets",
+  "indy-default-music",
+  "kevin-macleod-five-armies.mp3",
+);
 
 async function ensureDefaultAdventureMusic() {
-  const dir = path.join(ROOT, "assets", "indy-default-music");
-  const dest = path.join(dir, "kevin-macleod-five-armies.mp3");
-  fs.mkdirSync(dir, { recursive: true });
   const minBytes = 400_000;
-  if (fs.existsSync(dest) && fs.statSync(dest).size >= minBytes) return dest;
-
-  process.stderr.write(`Downloading adventure underscore (Kevin MacLeod — Five Armies, CC BY 3.0)… `);
-  const res = await fetch(DEFAULT_ADVENTURE_MUSIC_URL, {
-    headers: {
-      "user-agent": "FlightpathIndyVideo/1.3 (local render; incompetech royalty-free)",
-      accept: "audio/mpeg,*/*",
-    },
-  });
-  if (!res.ok) throw new Error(`Default music download failed: HTTP ${res.status}`);
-  fs.writeFileSync(dest, Buffer.from(await res.arrayBuffer()));
-  console.error(`ok → ${dest}`);
-
-  const attribution = `Five Armies
-© Kevin MacLeod — https://incompetech.com
-
-Licensed under Creative Commons: By Attribution 3.0
-https://creativecommons.org/licenses/by/3.0/
-
-Downloaded for local Flightpath renders from:
-${DEFAULT_ADVENTURE_MUSIC_URL}
-`;
-  fs.writeFileSync(path.join(dir, "ATTRIBUTION.txt"), attribution, "utf8");
-  return dest;
+  if (fs.existsSync(BUNDLED_ADVENTURE_MUSIC) && fs.statSync(BUNDLED_ADVENTURE_MUSIC).size >= minBytes) {
+    return BUNDLED_ADVENTURE_MUSIC;
+  }
+  throw new Error("Bundled default music asset is missing or too small.");
 }
 
 function writeVideoPreviewHtml(mp4Path) {

@@ -6,8 +6,7 @@ dist/
 .env
 .env.*
 
-# Cached CC-BY music (see server/assets/indy-default-music/ATTRIBUTION.txt)
-server/assets/indy-default-music/*.mp3
+# Bundled CC-BY music is committed with attribution in server/assets/indy-default-music/
 
 # Renderer and web UI output (MP4, previews, OSM tile temps, frame temps)
 server/output/
