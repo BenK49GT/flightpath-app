@@ -160,7 +160,7 @@ export async function handleIndyRender(body) {
     const date = body?.date;
     const leg = (body?.leg || "longest").toLowerCase();
     const mapType = String(body?.mapType || "osm").toLowerCase();
-    const resolution = String(body?.resolution || "720p").toLowerCase();
+    const resolution = String(body?.resolution || "480p").toLowerCase();
     if (!["osm", "vfr", "ifr"].includes(mapType)) {
       return {
         status: 400,
