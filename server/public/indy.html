@@ -205,6 +205,26 @@
       statusEl.textContent = t || "";
     }
 
+    async function readJsonOrThrow(res, context) {
+      const raw = await res.text();
+      if (!raw) {
+        throw new Error(context + " returned an empty response. Please retry.");
+      }
+      try {
+        return JSON.parse(raw);
+      } catch {
+        const preview = raw.slice(0, 180).replace(/\s+/g, " ").trim();
+        throw new Error(
+          context +
+            " returned non-JSON (" +
+            res.status +
+            "). " +
+            (preview ? "Body: " + preview : "No readable body.") +
+            " Try again in a moment.",
+        );
+      }
+    }
+
     function startElapsedTicker(el, prefix) {
       const t0 = Date.now();
       const id = setInterval(() => {
@@ -258,7 +278,7 @@
         const u = new URL("/api/indy/dates", window.location.origin);
         u.searchParams.set("reg", reg);
         const res = await fetch(u.toString());
-        const data = await res.json();
+        const data = await readJsonOrThrow(res, "Find flight dates");
         if (!res.ok) throw new Error(data.message || data.error || res.statusText);
         datesPayload = data.dates || [];
         if (!datesPayload.length) {
@@ -311,14 +331,14 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ reg, date: selectedDate, leg: "longest", mapType }),
         });
-        const data = await res.json();
+        const data = await readJsonOrThrow(res, "Start render");
         if (res.status === 429) throw new Error(data.message || "Server busy");
         if (!res.ok) throw new Error(data.message || data.error || res.statusText);
         const jobId = data.jobId;
         for (;;) {
           await new Promise((r) => setTimeout(r, 1200));
           const jr = await fetch("/api/indy/jobs/" + jobId + "?cb=" + Date.now());
-          const j = await jr.json();
+          const j = await readJsonOrThrow(jr, "Render status");
           if (!jr.ok) throw new Error(j.message || "Poll failed");
           if (j.status === "done") {
             if (!j.videoUrl) throw new Error("No video URL from server");
