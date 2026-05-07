@@ -242,6 +242,14 @@
       return () => clearInterval(id);
     }
 
+    function formatDuration(totalSec) {
+      const s = Math.max(0, Number(totalSec) || 0);
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      if (h > 0) return h + "h " + String(m).padStart(2, "0") + "m";
+      return m + "m";
+    }
+
     function loadVideoIntoPlayer(videoPath, jobId) {
       const url = new URL(videoPath, window.location.origin);
       url.searchParams.set("job", jobId);
@@ -297,7 +305,11 @@
         for (const d of datesPayload) {
           const b = document.createElement("button");
           b.type = "button";
-          b.textContent = d.date + " · " + d.pointCount + " pts · " + d.kind;
+          const airports = Array.isArray(d.airportsVisited)
+            ? d.airportsVisited.map((a) => a.code).filter(Boolean)
+            : [];
+          const airportLabel = airports.length ? airports.join(", ") : "airport unknown";
+          b.textContent = d.date + " · " + formatDuration(d.totalFlightSec) + " · " + airportLabel;
           b.addEventListener("click", () => {
             selectedDate = d.date;
             datesList.querySelectorAll("button").forEach((x) => x.classList.remove("selected"));
