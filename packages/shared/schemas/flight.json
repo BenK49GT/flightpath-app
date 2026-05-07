@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flightpath.local/schemas/flight.json",
+  "title": "Flight",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "icao24", "registration", "startTimeUnix", "endTimeUnix", "pointCount"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{6}_\\d+$",
+      "description": "{icao24}_{startUnixSec}"
+    },
+    "icao24": { "type": "string", "pattern": "^[0-9a-f]{6}$" },
+    "registration": { "type": "string" },
+    "startTimeUnix": { "type": "integer", "minimum": 0 },
+    "endTimeUnix": { "type": "integer", "minimum": 0 },
+    "durationSec": { "type": ["integer", "null"], "minimum": 0 },
+    "pointCount": { "type": "integer", "minimum": 0 },
+    "bbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minLat", "maxLat", "minLon", "maxLon"],
+      "properties": {
+        "minLat": { "type": "number" },
+        "maxLat": { "type": "number" },
+        "minLon": { "type": "number" },
+        "maxLon": { "type": "number" }
+      }
+    },
+    "originGuess": { "$ref": "#/$defs/airportGuess" },
+    "destinationGuess": { "$ref": "#/$defs/airportGuess" }
+  },
+  "$defs": {
+    "airportGuess": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["code", "name", "lat", "lon", "distanceNm"],
+      "properties": {
+        "code": { "type": "string" },
+        "name": { "type": "string" },
+        "lat": { "type": "number" },
+        "lon": { "type": "number" },
+        "distanceNm": { "type": "number", "minimum": 0 }
+      }
+    }
+  }
+}

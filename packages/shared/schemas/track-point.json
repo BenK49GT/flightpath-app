@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flightpath.local/schemas/track-point.json",
+  "title": "TrackPoint",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["t", "lat", "lon"],
+  "properties": {
+    "t": { "type": "integer", "description": "Unix epoch seconds (UTC)" },
+    "lat": { "type": "number", "minimum": -90, "maximum": 90 },
+    "lon": { "type": "number", "minimum": -180, "maximum": 180 },
+    "altFt": { "type": ["number", "null"] },
+    "gsKt": { "type": ["number", "null"] },
+    "trackDeg": { "type": ["number", "null"] }
+  }
+}

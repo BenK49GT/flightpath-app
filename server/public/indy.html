@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Flightpath — Indy map video</title>
+  <style>
+    :root {
+      --bg: #1a1510;
+      --panel: #2a2218;
+      --text: #f5e6c8;
+      --muted: #c9b896;
+      --accent: #c43a32;
+      --border: #5c4a3a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: "Georgia", "Times New Roman", serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      min-height: 100vh;
+      line-height: 1.45;
+    }
+    .wrap {
+      max-width: 52rem;
+      margin: 0 auto;
+      padding: 1.5rem 1rem 3rem;
+    }
+    h1 {
+      font-weight: 600;
+      font-size: 1.55rem;
+      margin: 0 0 0.35rem;
+      letter-spacing: 0.02em;
+    }
+    .sub {
+      color: var(--muted);
+      font-size: 0.95rem;
+      margin-bottom: 1.5rem;
+    }
+    label { display: block; font-size: 0.88rem; color: var(--muted); margin-bottom: 0.35rem; }
+    input[type="text"], select {
+      width: 100%;
+      max-width: 20rem;
+      padding: 0.55rem 0.65rem;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: #0f0c09;
+      color: var(--text);
+      font-size: 1rem;
+    }
+    button {
+      margin-top: 0.75rem;
+      padding: 0.55rem 1.1rem;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      font-size: 0.95rem;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .row { margin-bottom: 1rem; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1rem 1.1rem;
+      margin-top: 1.25rem;
+    }
+    .err {
+      color: #f8a8a4;
+      font-size: 0.9rem;
+      margin-top: 0.75rem;
+      white-space: pre-wrap;
+    }
+    .hint { font-size: 0.82rem; color: var(--muted); margin-top: 0.5rem; }
+    video {
+      width: 100%;
+      max-height: 70vh;
+      background: #000;
+      border-radius: 4px;
+      margin-top: 0.75rem;
+      border: 1px solid var(--border);
+    }
+    .status { font-size: 0.9rem; color: var(--muted); margin-top: 0.5rem; }
+    .dates-list { max-height: 12rem; overflow-y: auto; margin-top: 0.5rem; }
+    .dates-list button {
+      display: block;
+      width: 100%;
+      text-align: left;
+      margin-top: 0.35rem;
+      background: #3d3228;
+      color: var(--text);
+    }
+    .dates-list button.selected { outline: 2px solid var(--accent); }
+    .busy-block {
+      margin-top: 0.65rem;
+      max-width: 28rem;
+    }
+    .busy-block[hidden] { display: none !important; }
+    .progress-bar {
+      height: 6px;
+      background: #0f0c09;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .progress-indeterminate {
+      height: 100%;
+      width: 35%;
+      background: linear-gradient(90deg, var(--accent), #e85c54);
+      border-radius: 3px;
+      animation: progressSlide 1.1s ease-in-out infinite;
+    }
+    @keyframes progressSlide {
+      0% { transform: translateX(-120%); }
+      100% { transform: translateX(320%); }
+    }
+    .busy-detail {
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin-top: 0.4rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Flightpath map video</h1>
+    <p class="sub">U.S. N-number → ADS-B Exchange globe traces → parchment flight clip (with music).</p>
+
+    <div class="panel">
+      <div class="row">
+        <label for="reg">N-number</label>
+        <input id="reg" type="text" placeholder="N49GT" autocomplete="off" />
+        <button type="button" id="btnLoadDates">Find flight dates</button>
+        <p class="hint">Scans the last ~120 UTC days on globe_history (takes a minute). Respect ADS-B Exchange terms.</p>
+        <div id="scanBusy" class="busy-block" hidden>
+          <div class="progress-bar" aria-hidden="true"><div class="progress-indeterminate"></div></div>
+          <p id="scanBusyText" class="busy-detail"></p>
+        </div>
+      </div>
+      <div id="datesSection" class="row" hidden>
+        <label>Pick a date</label>
+        <div id="datesList" class="dates-list"></div>
+        <button type="button" id="btnRender" disabled>Generate video</button>
+      </div>
+      <div id="msg" class="err" hidden></div>
+      <div id="status" class="status"></div>
+    </div>
+
+    <div class="panel" id="videoPanel" hidden>
+      <label>Result</label>
+      <div id="renderBusy" class="busy-block" hidden>
+        <div class="progress-bar" aria-hidden="true"><div class="progress-indeterminate"></div></div>
+        <p id="renderBusyText" class="busy-detail"></p>
+      </div>
+      <video id="player" controls playsinline preload="metadata"></video>
+    </div>
+  </div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const regInput = $("reg");
+    const btnLoadDates = $("btnLoadDates");
+    const btnRender = $("btnRender");
+    const datesSection = $("datesSection");
+    const datesList = $("datesList");
+    const msg = $("msg");
+    const statusEl = $("status");
+    const videoPanel = $("videoPanel");
+    const player = $("player");
+    const scanBusy = $("scanBusy");
+    const scanBusyText = $("scanBusyText");
+    const renderBusy = $("renderBusy");
+    const renderBusyText = $("renderBusyText");
+
+    let selectedDate = null;
+    let datesPayload = [];
+
+    function showErr(text) {
+      msg.hidden = !text;
+      msg.textContent = text || "";
+    }
+
+    function setStatus(t) {
+      statusEl.textContent = t || "";
+    }
+
+    function startElapsedTicker(el, prefix) {
+      const t0 = Date.now();
+      const id = setInterval(() => {
+        const s = Math.floor((Date.now() - t0) / 1000);
+        el.textContent = prefix + " — " + s + "s elapsed";
+      }, 500);
+      return () => clearInterval(id);
+    }
+
+    function loadVideoIntoPlayer(videoPath, jobId) {
+      const url = new URL(videoPath, window.location.origin);
+      url.searchParams.set("job", jobId);
+      url.searchParams.set("cb", String(Date.now()));
+
+      player.pause();
+      player.removeAttribute("src");
+      while (player.firstChild) player.removeChild(player.firstChild);
+      player.load();
+
+      player.addEventListener("error", () => {
+        showErr("Video failed to load. Try Generate again or hard-refresh the page.");
+      }, { once: true });
+      player.addEventListener(
+        "loadeddata",
+        () => {
+          setStatus("Done — clip ready.");
+        },
+        { once: true },
+      );
+
+      player.src = url.href;
+      player.load();
+    }
+
+    btnLoadDates.addEventListener("click", async () => {
+      showErr("");
+      const reg = regInput.value.trim().toUpperCase();
+      if (!reg.startsWith("N")) {
+        showErr("Enter a U.S. registration starting with N (e.g. N49GT).");
+        return;
+      }
+      btnLoadDates.disabled = true;
+      scanBusy.hidden = false;
+      scanBusyText.textContent = "Contacting globe_history (one request per UTC day)…";
+      const stopTick = startElapsedTicker(scanBusyText, "Scanning");
+      setStatus("Working… progress bar below.");
+      datesSection.hidden = true;
+      btnRender.disabled = true;
+      selectedDate = null;
+      try {
+        const u = new URL("/api/indy/dates", window.location.origin);
+        u.searchParams.set("reg", reg);
+        const res = await fetch(u.toString());
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.message || data.error || res.statusText);
+        datesPayload = data.dates || [];
+        if (!datesPayload.length) {
+          setStatus("No trace days found in the scanned window for " + data.registration + ".");
+          return;
+        }
+        datesList.innerHTML = "";
+        for (const d of datesPayload) {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.textContent = d.date + " · " + d.pointCount + " pts · " + d.kind;
+          b.addEventListener("click", () => {
+            selectedDate = d.date;
+            datesList.querySelectorAll("button").forEach((x) => x.classList.remove("selected"));
+            b.classList.add("selected");
+            btnRender.disabled = false;
+          });
+          datesList.appendChild(b);
+        }
+        datesSection.hidden = false;
+        setStatus("Found " + datesPayload.length + " day(s) with data. Pick one, then generate.");
+      } catch (e) {
+        showErr(String(e.message || e));
+        setStatus("");
+      } finally {
+        stopTick();
+        scanBusy.hidden = true;
+        btnLoadDates.disabled = false;
+      }
+    });
+
+    btnRender.addEventListener("click", async () => {
+      showErr("");
+      const reg = regInput.value.trim().toUpperCase();
+      if (!selectedDate) return;
+      btnRender.disabled = true;
+      videoPanel.hidden = false;
+      renderBusy.hidden = false;
+      renderBusyText.textContent = "Encoding (map tiles, frames, audio)…";
+      const stopRenderTick = startElapsedTicker(renderBusyText, "Rendering");
+      player.pause();
+      player.removeAttribute("src");
+      while (player.firstChild) player.removeChild(player.firstChild);
+      player.load();
+      setStatus("Render queued…");
+      try {
+        const res = await fetch("/api/indy/render", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reg, date: selectedDate, leg: "longest" }),
+        });
+        const data = await res.json();
+        if (res.status === 429) throw new Error(data.message || "Server busy");
+        if (!res.ok) throw new Error(data.message || data.error || res.statusText);
+        const jobId = data.jobId;
+        for (;;) {
+          await new Promise((r) => setTimeout(r, 1200));
+          const jr = await fetch("/api/indy/jobs/" + jobId + "?cb=" + Date.now());
+          const j = await jr.json();
+          if (!jr.ok) throw new Error(j.message || "Poll failed");
+          if (j.status === "done") {
+            if (!j.videoUrl) throw new Error("No video URL from server");
+            loadVideoIntoPlayer(j.videoUrl, jobId);
+            break;
+          }
+          if (j.status === "error") throw new Error(j.error || "Render failed");
+        }
+      } catch (e) {
+        showErr(String(e.message || e));
+        setStatus("");
+      } finally {
+        stopRenderTick();
+        renderBusy.hidden = true;
+        btnRender.disabled = !selectedDate;
+      }
+    });
+  </script>
+</body>
+</html>

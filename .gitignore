@@ -1,0 +1,13 @@
+node_modules/
+**/node_modules/
+.expo/
+dist/
+*.log
+.env
+.env.*
+
+# Cached CC-BY music (see server/assets/indy-default-music/ATTRIBUTION.txt)
+server/assets/indy-default-music/*.mp3
+
+# Renderer and web UI output (MP4, previews, OSM tile temps, frame temps)
+server/output/

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flightpath.local/schemas/api-error.json",
+  "title": "APIError",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["error", "message"],
+  "properties": {
+    "error": {
+      "type": "string",
+      "description": "Machine-readable error code"
+    },
+    "message": {
+      "type": "string",
+      "description": "Human-readable explanation"
+    },
+    "details": {
+      "type": "object",
+      "description": "Optional structured context",
+      "additionalProperties": true
+    }
+  }
+}

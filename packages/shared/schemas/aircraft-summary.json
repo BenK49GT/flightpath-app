@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flightpath.local/schemas/aircraft-summary.json",
+  "title": "AircraftSummaryResponse",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["registration", "requestedRangeUtc", "sources"],
+  "properties": {
+    "registration": { "type": "string", "pattern": "^N[A-Z0-9]{1,9}$" },
+    "icao24": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{6}$",
+      "description": "Lowercase hex ICAO Mode S address without 0x prefix"
+    },
+    "aircraftType": { "type": ["string", "null"] },
+    "manufacturer": { "type": ["string", "null"] },
+    "requestedRangeUtc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to"],
+      "properties": {
+        "from": { "type": "string", "format": "date" },
+        "to": { "type": "string", "format": "date" }
+      }
+    },
+    "traceCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["daysWithData", "daysRequested"],
+      "properties": {
+        "daysRequested": { "type": "integer", "minimum": 0 },
+        "daysWithData": { "type": "integer", "minimum": 0 },
+        "notes": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "role"],
+        "properties": {
+          "name": { "type": "string" },
+          "role": { "type": "string" },
+          "licenseOrTermsUrl": { "type": "string", "format": "uri" }
+        }
+      }
+    }
+  }
+}

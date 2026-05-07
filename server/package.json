@@ -1,0 +1,19 @@
+{
+  "name": "flightpath-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "ingest": "node scripts/ingest-trace.mjs",
+    "fetch-traces": "node scripts/fetch-traces-range.mjs",
+    "seed-demo": "node scripts/seed-demo-trace.mjs",
+    "indy-video": "node scripts/render-indy-video.mjs",
+    "indy-video-open": "node scripts/render-indy-video.mjs --open"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2"
+  }
+}

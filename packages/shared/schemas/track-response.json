@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flightpath.local/schemas/track-response.json",
+  "title": "TrackResponse",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["flightId", "registration", "icao24", "points", "simplification"],
+  "properties": {
+    "flightId": { "type": "string" },
+    "registration": { "type": "string" },
+    "icao24": { "type": "string" },
+    "points": {
+      "type": "array",
+      "items": { "$ref": "track-point.json" }
+    },
+    "simplification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxPoints", "epsilonDeg"],
+      "properties": {
+        "maxPoints": { "type": "integer" },
+        "epsilonDeg": { "type": "number" }
+      }
+    }
+  }
+}

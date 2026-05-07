@@ -1,0 +1,25 @@
+{
+  "registration": "N49GT",
+  "icao24": "a60e67",
+  "from": "2026-04-24",
+  "to": "2026-04-24",
+  "flights": [
+    {
+      "id": "a60e67_1777066620",
+      "icao24": "a60e67",
+      "registration": "N49GT",
+      "startTimeUnix": 1777066620,
+      "endTimeUnix": 1777067700,
+      "durationSec": 1080,
+      "pointCount": 37,
+      "bbox": {
+        "minLat": 41.4786,
+        "maxLat": 41.5653,
+        "minLon": -73.82140000000001,
+        "maxLon": -73.1352
+      },
+      "originGuess": null,
+      "destinationGuess": null
+    }
+  ]
+}
