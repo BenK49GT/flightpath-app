@@ -310,10 +310,10 @@
                 .map((a) => {
                   const c = a.code;
                   const f = a.faaIdent;
-                  if (!f || !c) return c || f;
-                  /** FlightAware-style N-number/FAA lids (avoid stripping K→OXC for tower fields). */
-                  if (/^\d/.test(f) || /^N\d/i.test(f)) return f;
-                  return c;
+                  if (f) return f;
+                  if (!c) return null;
+                  const m = /^K([A-Z0-9]{3})$/.exec(c);
+                  return m ? m[1] : c;
                 })
                 .filter(Boolean)
             : [];
