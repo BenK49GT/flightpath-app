@@ -8,5 +8,8 @@ dist/
 
 # Bundled CC-BY music is committed with attribution in server/assets/indy-default-music/
 
+# OurAirports CSV used only to regenerate server/data/airports_us_basic.json (see server/scripts/build-airports-us-basic.mjs)
+server/data/_airports_raw.csv
+
 # Renderer and web UI output (MP4, previews, OSM tile temps, frame temps)
 server/output/

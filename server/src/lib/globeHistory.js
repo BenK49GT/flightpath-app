@@ -7,11 +7,14 @@ import { ymdFromUtcMs } from "./dates.js";
 import { detectVisitedAirports, guessEndpoints } from "./nearestAirport.js";
 import { segmentFlights } from "./segment.js";
 
+/**
+ * `points` come straight from normalizeRawTraceToPoints (parsed globe_history rows only — no kinematic smoothing).
+ */
 function summarizeDay(points) {
   const flights = segmentFlights(points, {});
   const totalFlightSec = flights.reduce((acc, f) => acc + Math.max(0, Number(f.durationSec) || 0), 0);
   const airportsSeen = new Map();
-  const routeAirports = detectVisitedAirports(points, { maxNm: 3.2, minHits: 2, sampleStride: 2 });
+  const routeAirports = detectVisitedAirports(points);
 
   for (const ap of routeAirports) {
     if (!ap?.code) continue;
@@ -19,6 +22,11 @@ function summarizeDay(points) {
   }
 
   for (const f of flights) {
+    const segAirports = detectVisitedAirports(f.points, { bboxPadDeg: 2 });
+    for (const ap of segAirports) {
+      if (!ap?.code) continue;
+      if (!airportsSeen.has(ap.code)) airportsSeen.set(ap.code, ap.name || ap.code);
+    }
     const { originGuess, destinationGuess } = guessEndpoints(f.points);
     for (const ap of [originGuess, destinationGuess]) {
       if (!ap?.code) continue;
