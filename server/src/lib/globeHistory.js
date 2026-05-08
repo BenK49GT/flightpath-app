@@ -18,7 +18,11 @@ function summarizeDay(points) {
   const routeAirports = detectVisitedAirports(points);
   const airportsVisited = routeAirports
     .filter((ap) => ap?.code)
-    .map((ap) => ({ code: ap.code, name: ap.name || ap.code }));
+    .map((ap) => ({
+      code: ap.code,
+      name: ap.name || ap.code,
+      ...(ap.faaIdent ? { faaIdent: ap.faaIdent } : {}),
+    }));
 
   return {
     totalFlightSec,

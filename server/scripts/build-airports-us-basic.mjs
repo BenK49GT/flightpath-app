@@ -91,6 +91,9 @@ async function main() {
     if (!code || code.length < 3) continue;
 
     const name = cols[idx.name]?.trim() || code;
+    const localRaw =
+      typeof cols[idx.local_code] === "string" ? cols[idx.local_code].trim().toUpperCase() : "";
+    const faaIdent = localRaw && localRaw !== code ? localRaw : null;
     const scheduledRaw = cols[idx.scheduled_service]?.trim().toLowerCase() || "";
     const scheduledService = scheduledRaw === "yes";
     const prev = byCode.get(code);
@@ -100,20 +103,22 @@ async function main() {
       ] ?? 0);
 
     if (!prev || pri(type) > pri(prev.type)) {
-      byCode.set(code, { code, name, lat, lon, type, scheduledService });
+      byCode.set(code, { code, name, lat, lon, type, scheduledService, faaIdent });
     } else if (prev) {
       prev.scheduledService = prev.scheduledService || scheduledService;
+      prev.faaIdent = prev.faaIdent || faaIdent;
     }
   }
 
   const out = Array.from(byCode.values())
-    .map(({ code, name, lat, lon, type, scheduledService }) => ({
+    .map(({ code, name, lat, lon, type, scheduledService, faaIdent }) => ({
       code,
       name,
       lat,
       lon,
       type,
       scheduledService: !!scheduledService,
+      ...(faaIdent ? { faaIdent } : {}),
     }))
     .sort((a, b) => a.code.localeCompare(b.code));
 

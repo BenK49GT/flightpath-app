@@ -197,11 +197,13 @@ function scanLandingContacts(points, pool, cfg) {
         name: nearest.name,
         lat: nearest.lat,
         lon: nearest.lon,
+        ...(nearest.faaIdent ? { faaIdent: nearest.faaIdent } : {}),
         airportType: nearest.airportType,
         hits: 0,
         firstIdx: i,
         distanceNm: nearest.distanceNm,
       };
+    if (nearest.faaIdent && !cur.faaIdent) cur.faaIdent = nearest.faaIdent;
     cur.hits += 1;
     cur.firstIdx = Math.min(cur.firstIdx, i);
     cur.distanceNm = Math.min(cur.distanceNm, nearest.distanceNm);
@@ -248,7 +250,14 @@ export function detectVisitedAirports(points, opts = {}) {
 
   return Array.from(seen.values())
     .sort((a, b) => a.firstIdx - b.firstIdx)
-    .map(({ code, name, lat, lon, distanceNm }) => ({ code, name, lat, lon, distanceNm }));
+    .map(({ code, name, lat, lon, distanceNm, faaIdent }) => ({
+      code,
+      name,
+      lat,
+      lon,
+      distanceNm,
+      ...(faaIdent ? { faaIdent } : {}),
+    }));
 }
 function sliceHead(points, max = 8) {
   return points.slice(0, Math.min(max, points.length));
@@ -274,6 +283,7 @@ function nearestInSet(samplePts, airports, maxNm) {
           lon: a.lon,
           distanceNm: dist,
           airportType: a.type ?? "small_airport",
+          ...(a.faaIdent ? { faaIdent: a.faaIdent } : {}),
         };
       }
     }
@@ -293,6 +303,7 @@ function nearestForPoint(pt, airports, maxNm) {
         lon: a.lon,
         distanceNm: dist,
         airportType: a.type ?? "small_airport",
+        ...(a.faaIdent ? { faaIdent: a.faaIdent } : {}),
       };
     }
   }
