@@ -340,17 +340,21 @@ export function detectEndpointVisitedAirports(points, flights, opts = {}) {
     const win = Math.min(Math.max(1, headTailWindow), Math.floor(n / 2) || 1);
 
     // Stop boundary: a long gap between this flight and the previous/next.
+    // Also include the day edges (first head / last tail) so final destination
+    // can still be inferred when there is no following segment on the same UTC day.
     const includeHead =
-      fi > 0 &&
-      Number.isFinite(f.startTimeUnix) &&
-      Number.isFinite(flights[fi - 1]?.endTimeUnix) &&
-      f.startTimeUnix - flights[fi - 1].endTimeUnix >= dwellMinSec;
+      fi === 0 ||
+      (fi > 0 &&
+        Number.isFinite(f.startTimeUnix) &&
+        Number.isFinite(flights[fi - 1]?.endTimeUnix) &&
+        f.startTimeUnix - flights[fi - 1].endTimeUnix >= dwellMinSec);
 
     const includeTail =
-      fi + 1 < flights.length &&
-      Number.isFinite(f.endTimeUnix) &&
-      Number.isFinite(flights[fi + 1]?.startTimeUnix) &&
-      flights[fi + 1].startTimeUnix - f.endTimeUnix >= dwellMinSec;
+      fi + 1 === flights.length ||
+      (fi + 1 < flights.length &&
+        Number.isFinite(f.endTimeUnix) &&
+        Number.isFinite(flights[fi + 1]?.startTimeUnix) &&
+        flights[fi + 1].startTimeUnix - f.endTimeUnix >= dwellMinSec);
     if (!includeHead && !includeTail) continue;
 
     const head = includeHead ? pts.slice(0, win) : [];
