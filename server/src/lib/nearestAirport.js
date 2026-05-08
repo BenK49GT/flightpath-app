@@ -218,12 +218,20 @@ function scanLandingContacts(points, pool, cfg) {
         scheduledService: nearest.scheduledService === true,
         airportType: nearest.airportType,
         hits: 0,
+        slowHits: 0,
+        rollHits: 0,
+        minGsKt: Infinity,
+        minAltFt: Infinity,
         firstIdx: i,
         firstT: pt.t ?? 0,
         distanceNm: nearest.distanceNm,
       };
     if (nearest.faaIdent && !cur.faaIdent) cur.faaIdent = nearest.faaIdent;
     cur.hits += 1;
+    if (slowOk) cur.slowHits += 1;
+    if (rollOk) cur.rollHits += 1;
+    if (Number.isFinite(pt.gsKt)) cur.minGsKt = Math.min(cur.minGsKt, pt.gsKt);
+    if (Number.isFinite(pt.altFt)) cur.minAltFt = Math.min(cur.minAltFt, pt.altFt);
     cur.firstIdx = Math.min(cur.firstIdx, i);
     cur.firstT = Math.min(cur.firstT, pt.t ?? cur.firstT);
     cur.distanceNm = Math.min(cur.distanceNm, nearest.distanceNm);
@@ -233,7 +241,25 @@ function scanLandingContacts(points, pool, cfg) {
   for (const code of [...seen.keys()]) {
     const v = seen.get(code);
     const burstOk = v.hits >= burstMinHits && v.distanceNm <= burstMaxDistNm;
-    if (v.hits < minHits && !burstOk) seen.delete(code);
+    if (v.hits < minHits && !burstOk) {
+      seen.delete(code);
+      continue;
+    }
+
+    // Reject pure roll-by matches at high speed/altitude (common near neighboring fields).
+    const rollOnly = v.slowHits <= 0 && v.rollHits > 0;
+    if (rollOnly) {
+      const rollMaxGs = cfg.rollOnlyMaxGsKt ?? 98;
+      const rollMaxAlt = cfg.rollOnlyMaxAltFt ?? 1200;
+      if (
+        !Number.isFinite(v.minGsKt) ||
+        !Number.isFinite(v.minAltFt) ||
+        v.minGsKt > rollMaxGs ||
+        v.minAltFt > rollMaxAlt
+      ) {
+        seen.delete(code);
+      }
+    }
   }
 
   return seen;
