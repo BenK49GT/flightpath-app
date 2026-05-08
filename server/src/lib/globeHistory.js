@@ -102,7 +102,7 @@ export async function listGlobeDatesWithData(icaoLower, daysBack, delayMs) {
   const out = [];
   const now = new Date();
   const startUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-  const n = Math.min(Math.max(Number(daysBack) || 90, 1), 366);
+  const n = Math.min(Math.max(Number(daysBack) || 90, 1), 3650);
   const wait = Math.min(Math.max(Number(delayMs) || 100, 40), 800);
 
   for (let i = 0; i < n; i++) {

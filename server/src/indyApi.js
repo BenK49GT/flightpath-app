@@ -46,10 +46,9 @@ function launchRenderJob(jobId) {
       scriptPath,
       "--reg",
       j.registration,
-      "--from",
-      String(j.date),
-      "--to",
-      String(j.date),
+      ...(Array.isArray(j.dates) && j.dates.length
+        ? ["--dates", j.dates.join(",")]
+        : ["--from", String(j.date), "--to", String(j.date)]),
       "--leg",
       j.leg,
       "--output-basename",
@@ -58,6 +57,9 @@ function launchRenderJob(jobId) {
       j.mapType,
       "--resolution",
       j.resolution,
+      "--duration-sec",
+      String(j.durationSec || 14),
+      ...(j.multiFlight ? ["--cinematic-zoom-out"] : []),
     ],
     {
       cwd: SERVER_ROOT,
@@ -130,7 +132,7 @@ export async function handleIndyDates(reg, query) {
     const ac = lookupAircraft(registration);
     const daysBack = Math.min(
       Math.max(Number(query.daysBack) || MAX_DAYS_BACK, 1),
-      366,
+      3650,
     );
     const delayMs = Math.min(Math.max(Number(query.delayMs) || GLOBE_DELAY_MS, 40), 800);
 
@@ -158,6 +160,7 @@ export async function handleIndyRender(body) {
   try {
     const reg = body?.reg ?? body?.registration;
     const date = body?.date;
+    const datesRaw = Array.isArray(body?.dates) ? body.dates : null;
     const leg = (body?.leg || "longest").toLowerCase();
     const mapType = String(body?.mapType || "osm").toLowerCase();
     const resolution = String(body?.resolution || "480p").toLowerCase();
@@ -185,18 +188,28 @@ export async function handleIndyRender(body) {
       };
     }
 
-    if (!reg || !date) {
+    if (!reg || (!date && !(datesRaw && datesRaw.length))) {
       return {
         status: 400,
-        body: { error: "BAD_REQUEST", message: "JSON body must include `reg` and `date` (YYYY-MM-DD)" },
+        body: {
+          error: "BAD_REQUEST",
+          message: "JSON body must include `reg` and either `date` (YYYY-MM-DD) or `dates` (array)",
+        },
       };
     }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date))) {
+    const dates =
+      datesRaw && datesRaw.length
+        ? datesRaw.map((d) => String(d)).filter(Boolean)
+        : [String(date)];
+    if (!dates.length || dates.some((d) => !/^\d{4}-\d{2}-\d{2}$/.test(d))) {
       return {
         status: 400,
-        body: { error: "BAD_REQUEST", message: "`date` must be YYYY-MM-DD" },
+        body: { error: "BAD_REQUEST", message: "`date`/`dates` values must be YYYY-MM-DD" },
       };
     }
+    const uniqueDates = Array.from(new Set(dates)).sort((a, b) => a.localeCompare(b));
+    const multiFlight = uniqueDates.length > 1;
+    const durationSec = multiFlight ? 20 : 14;
 
     const registration = normalizeReg(String(reg));
     const ac = lookupAircraft(registration);
@@ -217,7 +230,10 @@ export async function handleIndyRender(body) {
     jobs.set(jobId, {
       status: "queued",
       registration: ac.registration,
-      date: String(date),
+      date: String(uniqueDates[0]),
+      dates: uniqueDates,
+      multiFlight,
+      durationSec,
       leg,
       mapType,
       resolution,
@@ -233,6 +249,8 @@ export async function handleIndyRender(body) {
       jobId,
       status: created?.status || "queued",
       resolution,
+      dates: uniqueDates,
+      durationSec,
       pollUrl: `/api/indy/jobs/${jobId}`,
       message: "Render accepted. Poll until status is done.",
     };
@@ -266,6 +284,7 @@ export async function handleIndyJob(jobId) {
     status: j.status,
     registration: j.registration,
     date: j.date,
+    dates: Array.isArray(j.dates) ? j.dates : [j.date],
     videoUrl: j.status === "done" ? `/api/indy/video/${jobId}` : null,
     mapType: j.mapType,
     resolution: j.resolution,

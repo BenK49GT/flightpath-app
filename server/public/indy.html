@@ -165,8 +165,9 @@
         </div>
       </div>
       <div id="datesSection" class="row" hidden>
-        <label>Pick a date</label>
+        <label>Pick one or more dates</label>
         <div id="datesList" class="dates-list"></div>
+        <button type="button" id="btnLoadMoreDates">Load more flights</button>
         <button type="button" id="btnRender" disabled>Generate video</button>
       </div>
       <div id="msg" class="err" hidden></div>
@@ -187,6 +188,7 @@
     const $ = (id) => document.getElementById(id);
     const regInput = $("reg");
     const btnLoadDates = $("btnLoadDates");
+    const btnLoadMoreDates = $("btnLoadMoreDates");
     const btnRender = $("btnRender");
     const mapTypeSel = $("mapType");
     const resolutionSel = $("resolution");
@@ -201,8 +203,10 @@
     const renderBusy = $("renderBusy");
     const renderBusyText = $("renderBusyText");
 
-    let selectedDate = null;
+    let selectedDates = new Set();
     let datesPayload = [];
+    let scannedDaysBack = 120;
+    const DAYS_STEP = 120;
 
     function showErr(text) {
       msg.hidden = !text;
@@ -275,6 +279,62 @@
       player.load();
     }
 
+    function selectedDateListSortedAsc() {
+      return Array.from(selectedDates).sort((a, b) => a.localeCompare(b));
+    }
+
+    function updateRenderButtonState() {
+      btnRender.disabled = selectedDates.size === 0;
+    }
+
+    function renderDatesList() {
+      datesList.innerHTML = "";
+      for (const d of datesPayload) {
+        const b = document.createElement("button");
+        b.type = "button";
+        const airports = Array.isArray(d.airportsVisited)
+          ? d.airportsVisited
+              .map((a) => {
+                const c = a.code;
+                const f = a.faaIdent;
+                if (f) return f;
+                if (!c) return null;
+                const m = /^K([A-Z0-9]{3})$/.exec(c);
+                return m ? m[1] : c;
+              })
+              .filter(Boolean)
+          : [];
+        const airportLabel = airports.length ? airports.join(", ") : "airport unknown";
+        b.textContent = d.date + " · " + formatDuration(d.totalFlightSec) + " · " + airportLabel;
+        if (selectedDates.has(d.date)) b.classList.add("selected");
+        b.addEventListener("click", () => {
+          if (selectedDates.has(d.date)) selectedDates.delete(d.date);
+          else selectedDates.add(d.date);
+          renderDatesList();
+          updateRenderButtonState();
+        });
+        datesList.appendChild(b);
+      }
+    }
+
+    async function loadDates(reg, daysBack, merge) {
+      const u = new URL("/api/indy/dates", window.location.origin);
+      u.searchParams.set("reg", reg);
+      u.searchParams.set("daysBack", String(daysBack));
+      const res = await fetch(u.toString(), { cache: "no-store" });
+      const data = await readJsonOrThrow(res, "Find flight dates");
+      if (!res.ok) throw new Error(data.message || data.error || res.statusText);
+      const incoming = Array.isArray(data.dates) ? data.dates : [];
+      if (!merge) {
+        datesPayload = incoming;
+      } else {
+        const byDate = new Map(datesPayload.map((d) => [d.date, d]));
+        for (const d of incoming) if (!byDate.has(d.date)) byDate.set(d.date, d);
+        datesPayload = Array.from(byDate.values()).sort((a, b) => b.date.localeCompare(a.date));
+      }
+      return data;
+    }
+
     btnLoadDates.addEventListener("click", async () => {
       showErr("");
       const reg = regInput.value.trim().toUpperCase();
@@ -289,46 +349,24 @@
       setStatus("Working… progress bar below.");
       datesSection.hidden = true;
       btnRender.disabled = true;
-      selectedDate = null;
+      selectedDates = new Set();
+      scannedDaysBack = 120;
       try {
-        const u = new URL("/api/indy/dates", window.location.origin);
-        u.searchParams.set("reg", reg);
-        const res = await fetch(u.toString(), { cache: "no-store" });
-        const data = await readJsonOrThrow(res, "Find flight dates");
-        if (!res.ok) throw new Error(data.message || data.error || res.statusText);
-        datesPayload = data.dates || [];
+        const data = await loadDates(reg, scannedDaysBack, false);
         if (!datesPayload.length) {
           setStatus("No trace days found in the scanned window for " + data.registration + ".");
           return;
         }
-        datesList.innerHTML = "";
-        for (const d of datesPayload) {
-          const b = document.createElement("button");
-          b.type = "button";
-          const airports = Array.isArray(d.airportsVisited)
-            ? d.airportsVisited
-                .map((a) => {
-                  const c = a.code;
-                  const f = a.faaIdent;
-                  if (f) return f;
-                  if (!c) return null;
-                  const m = /^K([A-Z0-9]{3})$/.exec(c);
-                  return m ? m[1] : c;
-                })
-                .filter(Boolean)
-            : [];
-          const airportLabel = airports.length ? airports.join(", ") : "airport unknown";
-          b.textContent = d.date + " · " + formatDuration(d.totalFlightSec) + " · " + airportLabel;
-          b.addEventListener("click", () => {
-            selectedDate = d.date;
-            datesList.querySelectorAll("button").forEach((x) => x.classList.remove("selected"));
-            b.classList.add("selected");
-            btnRender.disabled = false;
-          });
-          datesList.appendChild(b);
-        }
+        renderDatesList();
         datesSection.hidden = false;
-        setStatus("Found " + datesPayload.length + " day(s) with data. Pick one, then generate.");
+        btnLoadMoreDates.hidden = false;
+        setStatus(
+          "Found " +
+            datesPayload.length +
+            " day(s) with data in last " +
+            scannedDaysBack +
+            " days. Pick dates, then generate.",
+        );
       } catch (e) {
         showErr(String(e.message || e));
         setStatus("");
@@ -339,12 +377,41 @@
       }
     });
 
+    btnLoadMoreDates.addEventListener("click", async () => {
+      showErr("");
+      const reg = regInput.value.trim().toUpperCase();
+      if (!reg.startsWith("N")) {
+        showErr("Enter a U.S. registration starting with N (e.g. N49GT).");
+        return;
+      }
+      btnLoadMoreDates.disabled = true;
+      scanBusy.hidden = false;
+      const nextDays = Math.min(3650, scannedDaysBack + DAYS_STEP);
+      scanBusyText.textContent = "Scanning older flights (" + scannedDaysBack + " → " + nextDays + " days)…";
+      const stopTick = startElapsedTicker(scanBusyText, "Scanning");
+      try {
+        await loadDates(reg, nextDays, true);
+        scannedDaysBack = nextDays;
+        renderDatesList();
+        datesSection.hidden = false;
+        setStatus("Loaded " + datesPayload.length + " day(s) with data in last " + scannedDaysBack + " days.");
+        if (scannedDaysBack >= 3650) btnLoadMoreDates.disabled = true;
+      } catch (e) {
+        showErr(String(e.message || e));
+      } finally {
+        stopTick();
+        scanBusy.hidden = true;
+        if (scannedDaysBack < 3650) btnLoadMoreDates.disabled = false;
+      }
+    });
+
     btnRender.addEventListener("click", async () => {
       showErr("");
       const reg = regInput.value.trim().toUpperCase();
       const mapType = mapTypeSel.value;
       const resolution = resolutionSel.value;
-      if (!selectedDate) return;
+      const dates = selectedDateListSortedAsc();
+      if (!dates.length) return;
       btnRender.disabled = true;
       videoPanel.hidden = false;
       renderBusy.hidden = false;
@@ -359,7 +426,11 @@
         const res = await fetch("/api/indy/render", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ reg, date: selectedDate, leg: "longest", mapType, resolution }),
+          body: JSON.stringify(
+            dates.length === 1
+              ? { reg, date: dates[0], leg: "longest", mapType, resolution }
+              : { reg, dates, leg: "longest", mapType, resolution },
+          ),
         });
         const data = await readJsonOrThrow(res, "Start render");
         if (res.status === 402) throw new Error(data.message || "Selected resolution requires paid tier");
@@ -408,7 +479,7 @@
       } finally {
         stopRenderTick();
         renderBusy.hidden = true;
-        btnRender.disabled = !selectedDate;
+        updateRenderButtonState();
       }
     });
   </script>

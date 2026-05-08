@@ -43,7 +43,7 @@ const RESOLUTION_PRESETS = {
   "1440p": { w: 2560, h: 1440 },
 };
 const FPS = 24;
-const DURATION_SEC = 14;
+const DURATION_SEC = Math.min(20, Math.max(6, Number(arg("--duration-sec", "14")) || 14));
 const VIDEO_CRF = 18;
 const OSM_UA =
   "FlightpathIndyVideo/1.2 (flightpath local render; +https://www.openstreetmap.org/copyright)";
@@ -69,7 +69,13 @@ function sanitizeOutputBase(name) {
 const REG = (arg("--reg", "N49GT") || "N49GT").trim().toUpperCase();
 const FROM = arg("--from", "2026-04-24");
 const TO = arg("--to", FROM);
+const DATES_ARG = arg("--dates", "");
+const DATES = String(DATES_ARG || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 const LEG = (arg("--leg", "longest") || "longest").toLowerCase();
+const CINEMATIC_ZOOM_OUT = process.argv.includes("--cinematic-zoom-out");
 const OPEN_IN_OS = process.argv.includes("--open");
 const AUDIO_ARG = arg("--audio", null);
 const AUDIO_PATH = AUDIO_ARG ? String(AUDIO_ARG).trim() : null;
@@ -206,6 +212,38 @@ async function tryScrapeTrace(icaoLower, from, to) {
     }
   }
   return null;
+}
+
+async function fetchTraceForDay(icaoLower, ymd) {
+  const folder = icaoLower.slice(-2);
+  const [y, m, d] = ymd.split("-");
+  for (const kind of ["trace_full", "trace_recent"]) {
+    const url = globeHistoryUrl(y, m, d, folder, icaoLower, kind);
+    process.stderr.write(`Scrape: GET ${url} … `);
+    const { ok, data, status } = await fetchJson(url);
+    if (!ok) {
+      console.error(status);
+      continue;
+    }
+    const points = normalizeRawTraceToPoints(data);
+    if (!points?.length) {
+      console.error("no parseable points");
+      continue;
+    }
+    console.error(`ok → ${points.length} raw points`);
+    return { source: "globe.adsbexchange.com", url, ymd, points };
+  }
+  return null;
+}
+
+function downsampleByStride(points, maxPoints) {
+  if (points.length <= maxPoints) return points;
+  const stride = Math.max(1, Math.ceil(points.length / maxPoints));
+  const out = [];
+  for (let i = 0; i < points.length; i += stride) out.push(points[i]);
+  const last = points[points.length - 1];
+  if (out[out.length - 1] !== last) out.push(last);
+  return out;
 }
 
 function loadLocalTrace(icaoLower, ymdCompact) {
@@ -1155,24 +1193,68 @@ async function main() {
   console.error(`N-number ${REG} → ICAO24 ${hexUpper}`);
   console.error(`Render resolution ${RESOLUTION_KEY} (${W}x${H})`);
 
-  let pack = await tryScrapeTrace(icaoLower, FROM, TO);
-  if (!pack) {
-    const ymdCompact = FROM.replaceAll("-", "");
-    pack = loadLocalTrace(icaoLower, ymdCompact);
-  }
-  if (!pack) {
-    console.error("No trace data.");
-    process.exit(1);
-  }
+  const requestedDates = DATES.length ? DATES : [FROM];
+  const multiFlight = requestedDates.length > 1;
+  let points = [];
+  let rawPointCount = 0;
+  let cleanedCount = 0;
+  let legMeta = null;
+  let legIndex = 0;
+  let flightsFound = 1;
+  let usedFullTrace = false;
+  let pack = null;
 
-  const rawPointCount = pack.points.length;
-  const cleaned = preprocessRawPoints(pack.points);
-  console.error(`Cleaned ${rawPointCount} → ${cleaned.length} points (kinematic + dedupe).`);
+  if (multiFlight) {
+    let tCursor = 0;
+    for (const ymd of requestedDates.sort((a, b) => a.localeCompare(b))) {
+      let dayPack = await fetchTraceForDay(icaoLower, ymd);
+      if (!dayPack) {
+        const ymdCompact = ymd.replaceAll("-", "");
+        dayPack = loadLocalTrace(icaoLower, ymdCompact);
+      }
+      if (!dayPack) continue;
+      if (!pack) pack = dayPack;
 
-  const legPick = selectFlightLeg(cleaned, LEG);
-  const points = legPick.points;
-  const { legMeta, legIndex, flightsFound } = legPick;
-  const usedFullTrace = points.length === cleaned.length;
+      const cleanedDay = preprocessRawPoints(dayPack.points);
+      cleanedCount += cleanedDay.length;
+      rawPointCount += dayPack.points.length;
+      const pick = selectFlightLeg(cleanedDay, LEG);
+      const seg = pick.points.map((p, i) => ({ ...p, t: tCursor + i }));
+      tCursor += seg.length + 900;
+      points.push(...seg);
+    }
+    if (!points.length) {
+      console.error("No trace data for requested dates.");
+      process.exit(1);
+    }
+    points = downsampleByStride(points, 1800);
+    legMeta = {
+      startTimeUnix: points[0]?.t ?? 0,
+      endTimeUnix: points[points.length - 1]?.t ?? 0,
+      durationSec: Math.max(1, (points[points.length - 1]?.t ?? 0) - (points[0]?.t ?? 0)),
+    };
+    usedFullTrace = true;
+    flightsFound = requestedDates.length;
+  } else {
+    pack = await tryScrapeTrace(icaoLower, FROM, TO);
+    if (!pack) {
+      const ymdCompact = FROM.replaceAll("-", "");
+      pack = loadLocalTrace(icaoLower, ymdCompact);
+    }
+    if (!pack) {
+      console.error("No trace data.");
+      process.exit(1);
+    }
+
+    rawPointCount = pack.points.length;
+    const cleaned = preprocessRawPoints(pack.points);
+    cleanedCount = cleaned.length;
+    console.error(`Cleaned ${rawPointCount} → ${cleaned.length} points (kinematic + dedupe).`);
+    const legPick = selectFlightLeg(cleaned, LEG);
+    points = legPick.points;
+    ({ legMeta, legIndex, flightsFound } = legPick);
+    usedFullTrace = points.length === cleaned.length;
+  }
 
   if (!points.length) {
     console.error("No points to plot after cleaning/leg selection.");
@@ -1266,6 +1348,19 @@ async function main() {
     effectiveMaxViewMiles,
     followEnabled,
   );
+  if (cameraViews && CINEMATIC_ZOOM_OUT) {
+    const start = Math.max(0, Math.floor(totalFrames * 0.78));
+    for (let f = start; f < totalFrames; f++) {
+      const t = (f - start) / Math.max(1, totalFrames - 1 - start);
+      const a = cameraViews[f];
+      cameraViews[f] = {
+        x0: a.x0 * (1 - t) + viewRect.x0 * t,
+        x1: a.x1 * (1 - t) + viewRect.x1 * t,
+        y0: a.y0 * (1 - t) + viewRect.y0 * t,
+        y1: a.y1 * (1 - t) + viewRect.y1 * t,
+      };
+    }
+  }
   /** Chart rasters already look “noisy”; heavy grain reads as extra pixelation. */
   const grainStrength = mapSource.key === "osm" ? 1 : 0.38;
   const styleProfile =
@@ -1326,7 +1421,8 @@ async function main() {
   const legNote = usedFullTrace
     ? `Full cleaned path · ${points.length} pts`
     : `Leg ${legIndex + 1}/${flightsFound} · ${points.length} pts`;
-  const title = `${REG}  |  ${pack.ymd ?? FROM}  |  Mode S ${hexUpper}`;
+  const dayLabel = multiFlight ? `${requestedDates[0]}..${requestedDates[requestedDates.length - 1]}` : (pack.ymd ?? FROM);
+  const title = `${REG}  |  ${dayLabel}  |  Mode S ${hexUpper}`;
   const sub = `Map: ${mapSource.label}  ·  Data: ADS-B Exchange globe_history`;
   const esc = (s) => s.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'");
   const box = "box=1:boxcolor=0x2a1f14@0.78:boxborderw=14";
@@ -1440,7 +1536,8 @@ async function main() {
     dataSource: pack.source,
     scrapeUrl: pack.url ?? null,
     day: pack.ymd ?? FROM,
-    points: { raw: rawPointCount, cleaned: cleaned.length, plotted: points.length },
+    dates: requestedDates,
+    points: { raw: rawPointCount, cleaned: cleanedCount, plotted: points.length },
     leg: {
       index: legIndex,
       legsThatDay: flightsFound,
