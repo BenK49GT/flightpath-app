@@ -141,6 +141,13 @@ function matchesRunwayRollProximity(pt, nearestDistNm, rb) {
   return true;
 }
 
+function isRunwayRollEligible(ap) {
+  if (!ap) return false;
+  if (ap.airportType === "large_airport" || ap.airportType === "medium_airport") return true;
+  if (/^K[A-Z0-9]{3}$/.test(String(ap.code || ""))) return true;
+  return ap.scheduledService === true;
+}
+
 /**
  * Landing / on-field visits:
  * - Taxi / parked: inside ~1 NM and gs below 50 kt (or missing gs near-ground), or
@@ -161,6 +168,7 @@ function scanLandingContacts(points, pool, cfg) {
           maxAltFt: cfg.runwayBand?.maxAltFt ?? 3600,
         };
   const outerSearchNm = Math.max(maxDistNm, runwayBand?.maxDistNm ?? 0);
+  const rollPool = runwayBand ? pool.filter((a) => isRunwayRollEligible(a)) : [];
 
   const baseMinHits = cfg.minHits ?? 3;
   const ptLen = points.length;
@@ -181,14 +189,23 @@ function scanLandingContacts(points, pool, cfg) {
     const alt = pt.altFt;
     if (Number.isFinite(maxAltFt) && Number.isFinite(alt) && alt > maxAltFt) continue;
 
-    const nearest = nearestForPoint(pt, pool, outerSearchNm);
-    if (!nearest) continue;
+    const nearestSlow = nearestForPoint(pt, pool, maxDistNm);
+    const nearestRoll = runwayBand ? nearestForPoint(pt, rollPool, runwayBand.maxDistNm) : null;
 
-    const slowOk =
-      nearest.distanceNm <= maxDistNm && matchesLandingMotion(pt, motionCfg);
-    const rollOk = matchesRunwayRollProximity(pt, nearest.distanceNm, runwayBand);
+    const slowOk = nearestSlow && matchesLandingMotion(pt, motionCfg);
+    const rollOk =
+      nearestRoll &&
+      matchesRunwayRollProximity(pt, nearestRoll.distanceNm, runwayBand);
 
     if (!slowOk && !rollOk) continue;
+    const nearest =
+      slowOk && rollOk
+        ? nearestSlow.distanceNm <= nearestRoll.distanceNm
+          ? nearestSlow
+          : nearestRoll
+        : slowOk
+          ? nearestSlow
+          : nearestRoll;
 
     const cur =
       seen.get(nearest.code) ||
@@ -198,14 +215,17 @@ function scanLandingContacts(points, pool, cfg) {
         lat: nearest.lat,
         lon: nearest.lon,
         ...(nearest.faaIdent ? { faaIdent: nearest.faaIdent } : {}),
+        scheduledService: nearest.scheduledService === true,
         airportType: nearest.airportType,
         hits: 0,
         firstIdx: i,
+        firstT: pt.t ?? 0,
         distanceNm: nearest.distanceNm,
       };
     if (nearest.faaIdent && !cur.faaIdent) cur.faaIdent = nearest.faaIdent;
     cur.hits += 1;
     cur.firstIdx = Math.min(cur.firstIdx, i);
+    cur.firstT = Math.min(cur.firstT, pt.t ?? cur.firstT);
     cur.distanceNm = Math.min(cur.distanceNm, nearest.distanceNm);
     seen.set(nearest.code, cur);
   }
@@ -250,12 +270,13 @@ export function detectVisitedAirports(points, opts = {}) {
 
   return Array.from(seen.values())
     .sort((a, b) => a.firstIdx - b.firstIdx)
-    .map(({ code, name, lat, lon, distanceNm, faaIdent }) => ({
+    .map(({ code, name, lat, lon, distanceNm, faaIdent, firstT }) => ({
       code,
       name,
       lat,
       lon,
       distanceNm,
+      firstT,
       ...(faaIdent ? { faaIdent } : {}),
     }));
 }
@@ -298,6 +319,7 @@ export function detectEndpointVisitedAirports(points, flights, opts = {}) {
         lon: nearest.lon,
         distanceNm: nearest.distanceNm,
         airportType: nearest.airportType,
+        scheduledService: nearest.scheduledService === true,
         faaIdent: nearest.faaIdent,
         hits: 0,
         firstT: pt.t ?? 0,
@@ -355,12 +377,13 @@ export function detectEndpointVisitedAirports(points, flights, opts = {}) {
   return Array.from(seen.values())
     .filter((v) => v.hits >= minHits)
     .sort((a, b) => a.firstT - b.firstT)
-    .map(({ code, name, lat, lon, distanceNm, faaIdent }) => ({
+    .map(({ code, name, lat, lon, distanceNm, faaIdent, firstT }) => ({
       code,
       name,
       lat,
       lon,
       distanceNm,
+      firstT,
       ...(faaIdent ? { faaIdent } : {}),
     }));
 }
@@ -388,6 +411,7 @@ function nearestInSet(samplePts, airports, maxNm) {
           lon: a.lon,
           distanceNm: dist,
           airportType: a.type ?? "small_airport",
+          scheduledService: a.scheduledService === true,
           ...(a.faaIdent ? { faaIdent: a.faaIdent } : {}),
         };
       }
@@ -408,6 +432,7 @@ function nearestForPoint(pt, airports, maxNm) {
         lon: a.lon,
         distanceNm: dist,
         airportType: a.type ?? "small_airport",
+        scheduledService: a.scheduledService === true,
         ...(a.faaIdent ? { faaIdent: a.faaIdent } : {}),
       };
     }

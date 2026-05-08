@@ -19,17 +19,30 @@ function summarizeDay(points) {
   const endpointAirports = detectEndpointVisitedAirports(points, flights);
 
   const airportsSeen = new Map();
-  for (const ap of [...routeAirports, ...endpointAirports]) {
+  const ordered = [...routeAirports, ...endpointAirports].sort(
+    (a, b) => (a.firstT ?? Number.MAX_SAFE_INTEGER) - (b.firstT ?? Number.MAX_SAFE_INTEGER),
+  );
+  for (const ap of ordered) {
     if (!ap?.code) continue;
-    if (airportsSeen.has(ap.code)) continue;
-    airportsSeen.set(ap.code, {
-      code: ap.code,
-      name: ap.name || ap.code,
-      ...(ap.faaIdent ? { faaIdent: ap.faaIdent } : {}),
-    });
+    const prev = airportsSeen.get(ap.code);
+    const curT = ap.firstT ?? Number.MAX_SAFE_INTEGER;
+    if (!prev || curT < prev.firstT) {
+      airportsSeen.set(ap.code, {
+        code: ap.code,
+        name: ap.name || ap.code,
+        firstT: curT,
+        ...(ap.faaIdent ? { faaIdent: ap.faaIdent } : {}),
+      });
+    }
   }
 
-  const airportsVisited = Array.from(airportsSeen.values());
+  const airportsVisited = Array.from(airportsSeen.values())
+    .sort((a, b) => a.firstT - b.firstT)
+    .map(({ code, name, faaIdent }) => ({
+      code,
+      name,
+      ...(faaIdent ? { faaIdent } : {}),
+    }));
 
   return {
     totalFlightSec,
