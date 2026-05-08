@@ -9,8 +9,8 @@ import { segmentFlights } from "./segment.js";
 
 /**
  * `points` come straight from normalizeRawTraceToPoints (parsed globe_history rows only — no kinematic smoothing).
- * Airports listed only where the trace shows landing-like motion: near the field (~sectional symbol scale) and
- * groundspeed below 50 kt when reported (missing GS near-ground counts only when altitude is low).
+ * Airports listed only where the trace shows on-field segments: slow taxi near the field (~1 NM, gs below 50 kt
+ * or missing gs near-ground), or tight runway-roll samples (very close, moderate gs, low altitude).
  */
 function summarizeDay(points) {
   const flights = segmentFlights(points, {});

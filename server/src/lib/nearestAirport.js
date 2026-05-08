@@ -128,9 +128,23 @@ function matchesLandingMotion(pt, cfg) {
   return Number.isFinite(alt) && alt <= ceiling;
 }
 
+function matchesRunwayRollProximity(pt, nearestDistNm, rb) {
+  if (!rb) return false;
+  const maxD = rb.maxDistNm ?? 0.42;
+  const maxGs = rb.maxGsKt ?? 115;
+  const maxAlt = rb.maxAltFt ?? 3600;
+  if (nearestDistNm > maxD) return false;
+  const gs = pt.gsKt;
+  const alt = pt.altFt;
+  if (!Number.isFinite(gs) || gs >= maxGs) return false;
+  if (!Number.isFinite(alt) || alt > maxAlt) return false;
+  return true;
+}
+
 /**
- * Landing-only visits: within sectional-scale distance of the airport reference point,
- * and landing-like motion (groundspeed below 50 kt when reported; missing GS allowed only near-ground).
+ * Landing / on-field visits:
+ * - Taxi / parked: inside ~1 NM and gs below 50 kt (or missing gs near-ground), or
+ * - Runway roll / energetic ops: inside ~0.4 NM, gs below rollout cap, low altitude (captures ADS-B points like ~90 kt on pavement).
  */
 function scanLandingContacts(points, pool, cfg) {
   const seen = new Map();
@@ -138,6 +152,16 @@ function scanLandingContacts(points, pool, cfg) {
 
   const maxGsKt = cfg.maxGsKt ?? 50;
   const maxDistNm = cfg.maxDistNm ?? 1.0;
+  const runwayBand =
+    cfg.runwayBand === false
+      ? null
+      : {
+          maxDistNm: cfg.runwayBand?.maxDistNm ?? 0.42,
+          maxGsKt: cfg.runwayBand?.maxGsKt ?? 115,
+          maxAltFt: cfg.runwayBand?.maxAltFt ?? 3600,
+        };
+  const outerSearchNm = Math.max(maxDistNm, runwayBand?.maxDistNm ?? 0);
+
   const baseMinHits = cfg.minHits ?? 3;
   const ptLen = points.length;
   const minHits = ptLen < 36 ? Math.min(2, baseMinHits) : baseMinHits;
@@ -157,10 +181,14 @@ function scanLandingContacts(points, pool, cfg) {
     const alt = pt.altFt;
     if (Number.isFinite(maxAltFt) && Number.isFinite(alt) && alt > maxAltFt) continue;
 
-    if (!matchesLandingMotion(pt, motionCfg)) continue;
-
-    const nearest = nearestForPoint(pt, pool, maxDistNm);
+    const nearest = nearestForPoint(pt, pool, outerSearchNm);
     if (!nearest) continue;
+
+    const slowOk =
+      nearest.distanceNm <= maxDistNm && matchesLandingMotion(pt, motionCfg);
+    const rollOk = matchesRunwayRollProximity(pt, nearest.distanceNm, runwayBand);
+
+    if (!slowOk && !rollOk) continue;
 
     const cur =
       seen.get(nearest.code) ||
@@ -190,8 +218,8 @@ function scanLandingContacts(points, pool, cfg) {
 }
 
 /**
- * Airports where the trace shows an on-field segment: very close to the field AND groundspeed below threshold.
- * Uses raw globe_history points (no kinematic smoothing).
+ * Airports where the trace shows an on-field segment (slow taxi near reference point,
+ * or tight runway-roll envelope at moderate groundspeed). Uses raw globe_history points.
  */
 export function detectVisitedAirports(points, opts = {}) {
   const ap = loadAirports();
@@ -214,6 +242,8 @@ export function detectVisitedAirports(points, opts = {}) {
         : 4800,
     allowMissingGsNearGround: opts.allowMissingGsNearGround !== false,
     missingGsMaxAltFt: Number(opts.missingGsMaxAltFt) || 2600,
+    runwayBand:
+      opts.runwayBand === false ? false : (opts.runwayBand && typeof opts.runwayBand === "object" ? opts.runwayBand : {}),
   });
 
   return Array.from(seen.values())
