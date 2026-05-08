@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 
 import { eachUtcDayInclusive, parseYmdUtc, ymdFromUtcMs } from "./lib/dates.js";
 import { makeFlightId, parseFlightId } from "./lib/flightId.js";
-import { guessEndpoints } from "./lib/nearestAirport.js";
+import { getAirportCatalogStats, guessEndpoints } from "./lib/nearestAirport.js";
 import { lookupAircraft, normalizeReg } from "./lib/regLookup.js";
 import { segmentFlights } from "./lib/segment.js";
 import { simplifyTrack } from "./lib/simplify.js";
@@ -150,7 +150,21 @@ export async function flightTrack(ac, flightId, from, to, maxPoints, epsilonDeg)
 }
 
 export async function handleHealth() {
-  return { status: 200, body: { ok: true, service: "flightpath-api" } };
+  const cat = getAirportCatalogStats();
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      service: "flightpath-api",
+      airportsCatalogCount: cat.count,
+      airportsCatalogScheduledField: cat.hasScheduledServiceField,
+      gitCommit:
+        process.env.RENDER_GIT_COMMIT ||
+        process.env.REVISION ||
+        process.env.K_REVISION ||
+        null,
+    },
+  };
 }
 
 export async function handleSummary(reg, from, to) {

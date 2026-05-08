@@ -293,7 +293,7 @@
       try {
         const u = new URL("/api/indy/dates", window.location.origin);
         u.searchParams.set("reg", reg);
-        const res = await fetch(u.toString());
+        const res = await fetch(u.toString(), { cache: "no-store" });
         const data = await readJsonOrThrow(res, "Find flight dates");
         if (!res.ok) throw new Error(data.message || data.error || res.statusText);
         datesPayload = data.dates || [];

@@ -30,6 +30,18 @@ function loadAirports() {
   return airportsCache;
 }
 
+/** Cached row count + schema sanity for `/health` and startup logs. */
+export function getAirportCatalogStats() {
+  const list = loadAirports();
+  const row = list[0];
+  return {
+    count: list.length,
+    hasScheduledServiceField: Boolean(
+      row && Object.prototype.hasOwnProperty.call(row, "scheduledService"),
+    ),
+  };
+}
+
 /** Prefer bounding boxes around operational segments so cross-country traces do not pull in the entire US airport list. */
 function pointsForAirportBBox(points) {
   const ops = points.filter((p) => {

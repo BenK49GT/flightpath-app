@@ -203,7 +203,16 @@ export function start() {
 
     try {
       const { status, body } = await match.fn();
-      res.writeHead(status, JSON_CORS);
+      const pathnameOnly = new URL(req.url || "/", "http://localhost").pathname;
+      const headers =
+        pathnameOnly === "/api/indy/dates"
+          ? {
+              ...JSON_CORS,
+              "Cache-Control": "no-store, no-cache, must-revalidate, private",
+              Pragma: "no-cache",
+            }
+          : JSON_CORS;
+      res.writeHead(status, headers);
       res.end(JSON.stringify(body));
     } catch (e) {
       console.error(e);

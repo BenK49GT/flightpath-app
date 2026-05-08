@@ -15,6 +15,7 @@ import {
   handleIndyJob,
   handleIndyRender,
 } from "./indyApi.js";
+import { getAirportCatalogStats } from "./lib/nearestAirport.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "../public");
@@ -62,6 +63,8 @@ app.get("/indy", (_req, res) => {
 });
 
 app.get("/api/indy/dates", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, private");
+  res.setHeader("Pragma", "no-cache");
   const { status, body } = await handleIndyDates(req.query.reg, req.query);
   res.status(status).json(body);
 });
@@ -89,6 +92,13 @@ app.get("/api/indy/video/:jobId", (req, res) => {
 });
 
 app.listen(PORT, "0.0.0.0", () => {
+  const cat = getAirportCatalogStats();
   console.error(`flightpath-api (express) listening on http://0.0.0.0:${PORT}`);
   console.error(`Indy web UI: http://0.0.0.0:${PORT}/indy`);
+  console.error(
+    `[flightpath] US airport catalog: ${cat.count} rows (scheduledService field: ${cat.hasScheduledServiceField})`,
+  );
+  if (cat.count < 3000) {
+    console.error("[flightpath] WARN: airport catalog looks tiny — Indy airport detection may be wrong.");
+  }
 });
