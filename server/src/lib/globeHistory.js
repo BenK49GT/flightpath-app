@@ -4,39 +4,25 @@
 
 import { normalizeRawTraceToPoints } from "../../scripts/traceNormalize.mjs";
 import { ymdFromUtcMs } from "./dates.js";
-import { detectVisitedAirports, guessEndpoints } from "./nearestAirport.js";
+import { detectVisitedAirports } from "./nearestAirport.js";
 import { segmentFlights } from "./segment.js";
 
 /**
  * `points` come straight from normalizeRawTraceToPoints (parsed globe_history rows only — no kinematic smoothing).
+ * Airports listed only where the trace shows landing-like motion: near the field (~sectional symbol scale) and
+ * groundspeed below 50 kt when reported (missing GS near-ground counts only when altitude is low).
  */
 function summarizeDay(points) {
   const flights = segmentFlights(points, {});
   const totalFlightSec = flights.reduce((acc, f) => acc + Math.max(0, Number(f.durationSec) || 0), 0);
-  const airportsSeen = new Map();
   const routeAirports = detectVisitedAirports(points);
-
-  for (const ap of routeAirports) {
-    if (!ap?.code) continue;
-    if (!airportsSeen.has(ap.code)) airportsSeen.set(ap.code, ap.name || ap.code);
-  }
-
-  for (const f of flights) {
-    const segAirports = detectVisitedAirports(f.points, { bboxPadDeg: 2 });
-    for (const ap of segAirports) {
-      if (!ap?.code) continue;
-      if (!airportsSeen.has(ap.code)) airportsSeen.set(ap.code, ap.name || ap.code);
-    }
-    const { originGuess, destinationGuess } = guessEndpoints(f.points);
-    for (const ap of [originGuess, destinationGuess]) {
-      if (!ap?.code) continue;
-      if (!airportsSeen.has(ap.code)) airportsSeen.set(ap.code, ap.name || ap.code);
-    }
-  }
+  const airportsVisited = routeAirports
+    .filter((ap) => ap?.code)
+    .map((ap) => ({ code: ap.code, name: ap.name || ap.code }));
 
   return {
     totalFlightSec,
-    airportsVisited: Array.from(airportsSeen.entries()).map(([code, name]) => ({ code, name })),
+    airportsVisited,
   };
 }
 

@@ -115,36 +115,53 @@ export function guessEndpoints(points) {
   };
 }
 
-function scanAirportHits(points, pool, cfg) {
+/** gs reported below threshold, or missing GS only when low-altitude near the pavement (common gap-fill behavior). */
+function matchesLandingMotion(pt, cfg) {
+  const maxGsKt = cfg.maxGsKt ?? 50;
+  const gs = pt.gsKt;
+  if (Number.isFinite(gs)) return gs < maxGsKt;
+
+  if (!cfg.allowMissingGsNearGround) return false;
+
+  const alt = pt.altFt;
+  const ceiling = cfg.missingGsMaxAltFt ?? 2600;
+  return Number.isFinite(alt) && alt <= ceiling;
+}
+
+/**
+ * Landing-only visits: within sectional-scale distance of the airport reference point,
+ * and landing-like motion (groundspeed below 50 kt when reported; missing GS allowed only near-ground).
+ */
+function scanLandingContacts(points, pool, cfg) {
   const seen = new Map();
   if (!pool.length || !points.length) return seen;
 
-  const stride = cfg.stride ?? (points.length > 6000 ? 2 : 1);
+  const maxGsKt = cfg.maxGsKt ?? 50;
+  const maxDistNm = cfg.maxDistNm ?? 1.0;
+  const baseMinHits = cfg.minHits ?? 3;
+  const ptLen = points.length;
+  const minHits = ptLen < 36 ? Math.min(2, baseMinHits) : baseMinHits;
+  const burstMinHits = cfg.burstMinHits ?? 2;
+  const burstMaxDistNm = cfg.burstMaxDistNm ?? 0.48;
+  const maxAltFt = cfg.maxAltFt ?? 4800;
 
-  for (let i = 0; i < points.length; i += stride) {
+  const motionCfg = {
+    maxGsKt,
+    allowMissingGsNearGround: cfg.allowMissingGsNearGround !== false,
+    missingGsMaxAltFt: cfg.missingGsMaxAltFt ?? 2600,
+  };
+
+  for (let i = 0; i < points.length; i++) {
     const pt = points[i];
+
     const alt = pt.altFt;
-    const gs = pt.gsKt;
-    if (cfg.skipFastHigh) {
-      const { gsKt: maxGs, altFt: minAlt } = cfg.skipFastHigh;
-      if (
-        Number.isFinite(gs) &&
-        Number.isFinite(alt) &&
-        gs > maxGs &&
-        alt > minAlt
-      ) {
-        continue;
-      }
-    }
-    if (Number.isFinite(alt) && alt > (cfg.skipAltAbove ?? 11_000)) continue;
+    if (Number.isFinite(maxAltFt) && Number.isFinite(alt) && alt > maxAltFt) continue;
 
-    let maxNm = cfg.baseNm ?? 10;
-    if (Number.isFinite(alt) && alt > 6500) maxNm = cfg.midAltNm ?? maxNm;
-    if (Number.isFinite(alt) && alt < 4500) maxNm = cfg.lowAltNm ?? maxNm;
-    if (Number.isFinite(gs) && gs < 50) maxNm = Math.max(maxNm, cfg.lowGsNm ?? maxNm);
+    if (!matchesLandingMotion(pt, motionCfg)) continue;
 
-    const nearest = nearestForPoint(pt, pool, maxNm);
+    const nearest = nearestForPoint(pt, pool, maxDistNm);
     if (!nearest) continue;
+
     const cur =
       seen.get(nearest.code) ||
       {
@@ -163,25 +180,18 @@ function scanAirportHits(points, pool, cfg) {
     seen.set(nearest.code, cur);
   }
 
-  const minHits = cfg.minHits ?? 3;
-  const maxDist = cfg.maxDistNm ?? 2.5;
-  const ptLen = points.length;
-
   for (const code of [...seen.keys()]) {
     const v = seen.get(code);
-    const ok =
-      v.hits >= minHits ||
-      v.distanceNm <= maxDist ||
-      (cfg.allowSparse && ptLen < 40);
-    if (!ok) seen.delete(code);
+    const burstOk = v.hits >= burstMinHits && v.distanceNm <= burstMaxDistNm;
+    if (v.hits < minHits && !burstOk) seen.delete(code);
   }
 
   return seen;
 }
 
 /**
- * Detect airports along a trace using points straight from normalizeRawTraceToPoints (no kinematic smoothing).
- * Two-pass: national-field airports use inclusive radius; small strips need tight proximity / many hits.
+ * Airports where the trace shows an on-field segment: very close to the field AND groundspeed below threshold.
+ * Uses raw globe_history points (no kinematic smoothing).
  */
 export function detectVisitedAirports(points, opts = {}) {
   const ap = loadAirports();
@@ -191,61 +201,22 @@ export function detectVisitedAirports(points, opts = {}) {
   const candidates = filterAirportsByBBox(ap, points, bboxPad);
   const pool = candidates.length ? candidates : ap;
 
-  const majorPool = pool.filter((a) => a.type === "large_airport" || a.type === "medium_airport");
-
-  const minorTypes = new Set(["small_airport", "seaplane_base"]);
-  const scheduledMinorPool = pool.filter((a) => minorTypes.has(a.type) && a.scheduledService);
-  const privateMinorPool = pool.filter((a) => minorTypes.has(a.type) && !a.scheduledService);
-
-  const stride =
-    Number(opts.sampleStride) || (points.length > 6000 ? 2 : 1);
-
-  const majorHits = scanAirportHits(points, majorPool, {
-    stride,
-    baseNm: 11,
-    midAltNm: 9,
-    lowAltNm: 20,
-    lowGsNm: 17,
-    skipAltAbove: 11_000,
-    minHits: Math.max(2, Number(opts.majorMinHits) || 2),
-    maxDistNm: 4.2,
-    allowSparse: true,
+  const seen = scanLandingContacts(points, pool, {
+    maxGsKt: Number(opts.maxGsKt) || 50,
+    maxDistNm:
+      opts.maxDistNm !== undefined && opts.maxDistNm !== null
+        ? Number(opts.maxDistNm)
+        : 1.0,
+    minHits: Number(opts.minLandingHits) || 3,
+    maxAltFt:
+      opts.maxAltFt !== undefined && opts.maxAltFt !== null
+        ? Number(opts.maxAltFt)
+        : 4800,
+    allowMissingGsNearGround: opts.allowMissingGsNearGround !== false,
+    missingGsMaxAltFt: Number(opts.missingGsMaxAltFt) || 2600,
   });
 
-  const scheduledMinorHits = scanAirportHits(points, scheduledMinorPool, {
-    stride,
-    baseNm: 6,
-    midAltNm: 5,
-    lowAltNm: 10,
-    lowGsNm: 9,
-    skipAltAbove: 9500,
-    minHits: Math.max(10, Number(opts.scheduledMinorMinHits) || 10),
-    maxDistNm: 1.25,
-    allowSparse: false,
-  });
-
-  const privateMinorHits = scanAirportHits(points, privateMinorPool, {
-    stride: 1,
-    baseNm: 4,
-    midAltNm: 3.5,
-    lowAltNm: 6,
-    lowGsNm: 6,
-    skipFastHigh: { gsKt: 30, altFt: 1700 },
-    skipAltAbove: 4800,
-    minHits: Math.max(68, Number(opts.privateMinorMinHits) || 68),
-    maxDistNm: 0.42,
-    allowSparse: false,
-  });
-
-  const merged = new Map(majorHits);
-  for (const [code, v] of scheduledMinorHits) {
-    if (!merged.has(code)) merged.set(code, v);
-  }
-  for (const [code, v] of privateMinorHits) {
-    if (!merged.has(code)) merged.set(code, v);
-  }
-
-  return Array.from(merged.values())
+  return Array.from(seen.values())
     .sort((a, b) => a.firstIdx - b.firstIdx)
     .map(({ code, name, lat, lon, distanceNm }) => ({ code, name, lat, lon, distanceNm }));
 }
