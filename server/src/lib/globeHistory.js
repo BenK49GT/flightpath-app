@@ -4,7 +4,7 @@
 
 import { normalizeRawTraceToPoints } from "../../scripts/traceNormalize.mjs";
 import { ymdFromUtcMs } from "./dates.js";
-import { detectVisitedAirports } from "./nearestAirport.js";
+import { detectEndpointVisitedAirports, detectVisitedAirports } from "./nearestAirport.js";
 import { segmentFlights } from "./segment.js";
 
 /**
@@ -16,13 +16,20 @@ function summarizeDay(points) {
   const flights = segmentFlights(points, {});
   const totalFlightSec = flights.reduce((acc, f) => acc + Math.max(0, Number(f.durationSec) || 0), 0);
   const routeAirports = detectVisitedAirports(points);
-  const airportsVisited = routeAirports
-    .filter((ap) => ap?.code)
-    .map((ap) => ({
+  const endpointAirports = detectEndpointVisitedAirports(points, flights);
+
+  const airportsSeen = new Map();
+  for (const ap of [...routeAirports, ...endpointAirports]) {
+    if (!ap?.code) continue;
+    if (airportsSeen.has(ap.code)) continue;
+    airportsSeen.set(ap.code, {
       code: ap.code,
       name: ap.name || ap.code,
       ...(ap.faaIdent ? { faaIdent: ap.faaIdent } : {}),
-    }));
+    });
+  }
+
+  const airportsVisited = Array.from(airportsSeen.values());
 
   return {
     totalFlightSec,

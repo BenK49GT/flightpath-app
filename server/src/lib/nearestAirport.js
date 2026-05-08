@@ -259,6 +259,111 @@ export function detectVisitedAirports(points, opts = {}) {
       ...(faaIdent ? { faaIdent } : {}),
     }));
 }
+
+/**
+ * Endpoint-only “stop” evidence:
+ * If the trace has poor ADS-B coverage at a field (no obvious taxi/roll samples),
+ * we still try to pick up the airport from lowish altitude + modest groundspeed
+ * near the *start/end* of each segmented flight.
+ */
+export function detectEndpointVisitedAirports(points, flights, opts = {}) {
+  const ap = loadAirports();
+  if (!points.length || !ap.length || !Array.isArray(flights) || !flights.length) return [];
+
+  const bboxPad = opts.bboxPadDeg ?? 3;
+  const candidates = filterAirportsByBBox(ap, points, bboxPad);
+  const pool = candidates.length ? candidates : ap;
+
+  const headTailWindow = Number(opts.headTailWindow) || 12;
+  const maxDistNm = opts.maxDistNm ?? 2.6;
+  const maxAltFt = opts.maxAltFt ?? 2500;
+  // Primary rule: slower than taxi-ish speed.
+  const maxGsKt = opts.maxGsKt ?? 50;
+  // Relaxed ceiling for “poor ADS-B coverage” cases at stop boundaries.
+  const gsRelaxKt = opts.gsRelaxKt ?? 130;
+  // Only scan endpoints when there is a long gap indicating a stop.
+  const dwellMinSec = Number(opts.dwellMinSec ?? 900);
+  const minHits = Number(opts.minHits) || 2;
+
+  const seen = new Map();
+
+  const addHit = (nearest, pt) => {
+    const code = nearest.code;
+    const cur =
+      seen.get(code) ||
+      ({
+        code: nearest.code,
+        name: nearest.name ?? nearest.code,
+        lat: nearest.lat,
+        lon: nearest.lon,
+        distanceNm: nearest.distanceNm,
+        airportType: nearest.airportType,
+        faaIdent: nearest.faaIdent,
+        hits: 0,
+        firstT: pt.t ?? 0,
+      });
+
+    cur.hits += 1;
+    cur.firstT = Math.min(cur.firstT, pt.t ?? cur.firstT);
+    cur.distanceNm = Math.min(cur.distanceNm, nearest.distanceNm);
+    seen.set(code, cur);
+  };
+
+  for (let fi = 0; fi < flights.length; fi++) {
+    const f = flights[fi];
+    if (!f?.points?.length) continue;
+
+    const pts = f.points;
+    const n = pts.length;
+    const win = Math.min(Math.max(1, headTailWindow), Math.floor(n / 2) || 1);
+
+    // Stop boundary: a long gap between this flight and the previous/next.
+    const includeHead =
+      fi > 0 &&
+      Number.isFinite(f.startTimeUnix) &&
+      Number.isFinite(flights[fi - 1]?.endTimeUnix) &&
+      f.startTimeUnix - flights[fi - 1].endTimeUnix >= dwellMinSec;
+
+    const includeTail =
+      fi + 1 < flights.length &&
+      Number.isFinite(f.endTimeUnix) &&
+      Number.isFinite(flights[fi + 1]?.startTimeUnix) &&
+      flights[fi + 1].startTimeUnix - f.endTimeUnix >= dwellMinSec;
+    if (!includeHead && !includeTail) continue;
+
+    const head = includeHead ? pts.slice(0, win) : [];
+    const tail = includeTail ? pts.slice(Math.max(0, n - win)) : [];
+    const sample = head.concat(tail);
+
+    for (const pt of sample) {
+      const alt = pt.altFt;
+      if (Number.isFinite(maxAltFt) && Number.isFinite(alt) && alt > maxAltFt) continue;
+
+      const gs = pt.gsKt;
+      if (Number.isFinite(gs)) {
+        // When gs is available: accept gs < 50; otherwise allow up to `gsRelaxKt`
+        // specifically because we are scanning stop boundaries.
+        if (gs > maxGsKt && gs > gsRelaxKt) continue;
+      } // missing gs: accept because altitude gate already passed
+
+      const nearest = nearestForPoint(pt, pool, maxDistNm);
+      if (!nearest) continue;
+      addHit(nearest, pt);
+    }
+  }
+
+  return Array.from(seen.values())
+    .filter((v) => v.hits >= minHits)
+    .sort((a, b) => a.firstT - b.firstT)
+    .map(({ code, name, lat, lon, distanceNm, faaIdent }) => ({
+      code,
+      name,
+      lat,
+      lon,
+      distanceNm,
+      ...(faaIdent ? { faaIdent } : {}),
+    }));
+}
 function sliceHead(points, max = 8) {
   return points.slice(0, Math.min(max, points.length));
 }
