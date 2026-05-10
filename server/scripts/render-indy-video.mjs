@@ -11,14 +11,14 @@
  *   node scripts/render-indy-video.mjs [--reg N49GT] [--from YYYY-MM-DD] [--to YYYY-MM-DD]
  *        [--leg longest|first|0|1|…] [--open] [--audio path/to/track.m4a|mp3|wav] [--no-music]
  *        [--output-basename indy_flight] [--map-type osm|vfr|ifr] [--max-view-miles 100]
- *        [--resolution 480p|720p|1080p|1440p]
+ *        [--resolution 480p|720p|1080p|1440p] [--credits-sec 5]
  *
  * --open      Windows: Explorer with the MP4 selected (paths in chat are often not clickable).
  * --audio     Mux your own file instead of the default underscore (you must have rights to use it).
  * --no-music  Video only (skip default adventure underscore).
  *
  * Default music: Kevin MacLeod — "Five Armies" (incompetech.com), CC BY 3.0 — cached under
- * server/assets/indy-default-music/ on first run; on-screen attribution is burned in.
+ * server/assets/indy-default-music/ on first run; attribution appears on the end credits card.
  * (Not the Indiana Jones theme — that score is separately copyrighted.)
  */
 
@@ -44,6 +44,8 @@ const RESOLUTION_PRESETS = {
 };
 const FPS = 24;
 const DURATION_SEC = Math.min(20, Math.max(6, Number(arg("--duration-sec", "14")) || 14));
+/** Static end card duration (title, map/data credits, music, copyright). */
+const CREDITS_SEC = Math.min(14, Math.max(3, Number(arg("--credits-sec", "5")) || 5));
 const VIDEO_CRF = 18;
 const OSM_UA =
   "FlightpathIndyVideo/1.2 (flightpath local render; +https://www.openstreetmap.org/copyright)";
@@ -267,12 +269,71 @@ function toFfmpegFontPath(absPath) {
 }
 
 function resolveTitleFont() {
+  if (process.platform !== "win32") {
+    const candidates = [
+      "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+      "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+      "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+    ];
+    for (const p of candidates) {
+      if (fs.existsSync(p)) return p.replace(/:/g, "\\:");
+    }
+  }
   const windir = process.env.WINDIR || "C:\\Windows";
   for (const name of ["georgiab.ttf", "timesbd.ttf", "timesbi.ttf", "arial.ttf"]) {
     const p = path.join(windir, "Fonts", name);
     if (fs.existsSync(p)) return toFfmpegFontPath(p);
   }
   return "C\\:/Windows/Fonts/arial.ttf";
+}
+
+/**
+ * Lavfi chain: solid color + centered drawtext stack → label [ccredits] (for concat after main).
+ */
+function buildCreditsSlideFilter({
+  font,
+  esc,
+  W,
+  H,
+  FPS,
+  durSec,
+  title,
+  sub,
+  legNote,
+  showMacLeodCredit,
+  mapCopyright,
+}) {
+  const lines = [
+    { text: title, y: Math.round(H * 0.14), size: Math.max(26, Math.round(H / 28)), color: "0xf5e6c8" },
+    { text: sub, y: Math.round(H * 0.26), size: Math.max(16, Math.round(H / 56)), color: "0xe8d9b8" },
+    { text: legNote, y: Math.round(H * 0.33), size: Math.max(16, Math.round(H / 56)), color: "0xe8d9b8" },
+  ];
+  if (showMacLeodCredit) {
+    lines.push({
+      text: "Music: Five Armies — Kevin MacLeod — incompetech.com (CC BY 3.0)",
+      y: Math.round(H * 0.42),
+      size: Math.max(12, Math.round(H / 72)),
+      color: "0xc9b896",
+    });
+  }
+  lines.push({
+    text: mapCopyright,
+    y: H - Math.round(H * 0.12),
+    size: Math.max(13, Math.round(H / 64)),
+    color: "0xc9b896",
+  });
+
+  let graph = `color=c=0x1a1510:s=${W}x${H}:r=${FPS}:d=${durSec}[credraw];[credraw]format=yuv420p[cbg]`;
+  let prev = "cbg";
+  for (let i = 0; i < lines.length; i++) {
+    const ln = lines[i];
+    const out = i === lines.length - 1 ? "ccredits" : `ct${i}`;
+    graph += `;[${prev}]drawtext=fontfile='${font}':text='${esc(ln.text)}':fontcolor=${
+      ln.color
+    }:fontsize=${ln.size}:x=(w-text_w)/2:y=${ln.y}:shadowx=2:shadowy=2[${out}]`;
+    prev = out;
+  }
+  return graph;
 }
 
 function findFfmpeg() {
@@ -1435,22 +1496,23 @@ async function main() {
   const title = `${REG}  |  ${dayLabel}  |  Mode S ${hexUpper}`;
   const sub = `Map: ${mapSource.label}  ·  Data: ADS-B Exchange globe_history`;
   const esc = (s) => s.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'");
-  const box = "box=1:boxcolor=0x2a1f14@0.78:boxborderw=14";
-  const vfParts = [
-    `drawtext=fontfile='${font}':text='${esc(title)}':fontcolor=0xf5e6c8:fontsize=38:x=56:y=56:${box}`,
-    `drawtext=fontfile='${font}':text='${esc(sub)}':fontcolor=0xe8d9b8:fontsize=21:x=56:y=112:${box}`,
-    `drawtext=fontfile='${font}':text='${esc(legNote)}':fontcolor=0xe8d9b8:fontsize=21:x=56:y=152:${box}`,
-  ];
-  if (showMacLeodCredit) {
-    vfParts.push(
-      `drawtext=fontfile='${font}':text='${esc("Music: Five Armies — Kevin MacLeod — incompetech.com (CC BY 3.0)")}':fontcolor=0xc9b896:fontsize=12:x=56:y=h-100:${box}`,
-    );
-  }
-  vfParts.push(
-    `drawtext=fontfile='${font}':text='${esc(mapSource.copyright)}':fontcolor=0xc9b896:fontsize=15:x=56:y=h-56:${box}`,
-    "eq=contrast=1.03:brightness=0.01:saturation=0.96",
-  );
-  const vf = vfParts.join(",");
+  const totalOutputSec = DURATION_SEC + CREDITS_SEC;
+  /** Final file duration (credits omitted if grade+concat encode fails and we fall back to raw). */
+  let videoDurationForMux = totalOutputSec;
+  const creditsChain = buildCreditsSlideFilter({
+    font,
+    esc,
+    W,
+    H,
+    FPS,
+    durSec: CREDITS_SEC,
+    title,
+    sub,
+    legNote,
+    showMacLeodCredit,
+    mapCopyright: mapSource.copyright,
+  });
+  const filterComplex = `[0:v]eq=contrast=1.03:brightness=0.01:saturation=0.96[vgraded];${creditsChain};[vgraded][ccredits]concat=n=2:v=1:a=0[vout]`;
 
   const r2 = spawnSync(
     ffmpeg,
@@ -1458,8 +1520,10 @@ async function main() {
       "-y",
       "-i",
       rawPath,
-      "-vf",
-      vf,
+      "-filter_complex",
+      filterComplex,
+      "-map",
+      "[vout]",
       "-c:v",
       "libx264",
       "-crf",
@@ -1472,7 +1536,10 @@ async function main() {
     ],
     { stdio: "inherit", shell: false },
   );
-  if (r2.status !== 0) fs.copyFileSync(rawPath, outPath);
+  if (r2.status !== 0) {
+    fs.copyFileSync(rawPath, outPath);
+    videoDurationForMux = DURATION_SEC;
+  }
 
   let audioSourceUsed = null;
   let musicAttribution = null;
@@ -1486,10 +1553,12 @@ async function main() {
         outPath,
         "-i",
         audioMuxPath,
+        "-filter_complex",
+        `[1:a]apad=whole_dur=${videoDurationForMux}[aout]`,
         "-map",
         "0:v:0",
         "-map",
-        "1:a:0",
+        "[aout]",
         "-c:v",
         "copy",
         "-c:a",
@@ -1498,7 +1567,8 @@ async function main() {
         "192k",
         "-ar",
         "48000",
-        "-shortest",
+        "-t",
+        String(videoDurationForMux),
         "-movflags",
         "+faststart",
         muxTmp,
@@ -1563,7 +1633,9 @@ async function main() {
     audioSource: audioSourceUsed,
     musicAttribution: musicAttribution,
     fps: FPS,
-    durationSec: DURATION_SEC,
+    durationSec: videoDurationForMux,
+    mainAnimationSec: DURATION_SEC,
+    creditsSec: videoDurationForMux > DURATION_SEC ? CREDITS_SEC : 0,
     resolution: { key: RESOLUTION_KEY, width: W, height: H },
   };
   fs.writeFileSync(path.join(OUT_DIR, `${outputBase}_meta.json`), JSON.stringify(meta, null, 2));
