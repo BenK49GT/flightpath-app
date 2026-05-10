@@ -1236,10 +1236,20 @@ async function main() {
     usedFullTrace = true;
     flightsFound = requestedDates.length;
   } else {
-    pack = await tryScrapeTrace(icaoLower, FROM, TO);
-    if (!pack) {
-      const ymdCompact = FROM.replaceAll("-", "");
-      pack = loadLocalTrace(icaoLower, ymdCompact);
+    if (DATES.length === 1) {
+      // Single value in --dates: scrape that day (do not fall back to default --from).
+      const singleDay = DATES[0];
+      pack = await tryScrapeTrace(icaoLower, singleDay, singleDay);
+      if (!pack) {
+        const ymdCompact = singleDay.replaceAll("-", "");
+        pack = loadLocalTrace(icaoLower, ymdCompact);
+      }
+    } else {
+      pack = await tryScrapeTrace(icaoLower, FROM, TO);
+      if (!pack) {
+        const ymdCompact = FROM.replaceAll("-", "");
+        pack = loadLocalTrace(icaoLower, ymdCompact);
+      }
     }
     if (!pack) {
       console.error("No trace data.");

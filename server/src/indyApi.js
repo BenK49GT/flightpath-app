@@ -46,7 +46,8 @@ function launchRenderJob(jobId) {
       scriptPath,
       "--reg",
       j.registration,
-      ...(Array.isArray(j.dates) && j.dates.length
+      // One calendar day: pass --from/--to (single --dates was ignored in favor of default --from).
+      ...(j.multiFlight && Array.isArray(j.dates) && j.dates.length > 1
         ? ["--dates", j.dates.join(",")]
         : ["--from", String(j.date), "--to", String(j.date)]),
       "--leg",
