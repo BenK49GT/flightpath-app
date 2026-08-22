@@ -151,8 +151,8 @@ export async function handleIndyDates(reg, query) {
       body.scanStoppedEarly = scan.scanStoppedEarly;
       body.message =
         scan.dates.length > 0
-          ? "ADS-B Exchange rate-limited further scanning; showing cached and partial results. Wait a few minutes and try again."
-          : "ADS-B Exchange rate-limited this server (HTTP 429). Wait a few minutes, then retry Find flight dates.";
+          ? "ADS-B Exchange rate-limited further scanning; showing cached results from this instance. Wait 10–15 minutes, then Find flight dates again."
+          : "ADS-B Exchange is rate-limiting this server (HTTP 429). Wait 10–15 minutes with no scans, then retry Find flight dates.";
     }
     return { status: 200, body };
   } catch (e) {

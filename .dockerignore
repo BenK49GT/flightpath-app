@@ -3,4 +3,6 @@
 **/dist
 **/.git
 server/output
+# Seed/demo traces are local-only; production caches at runtime after successful scrapes.
+server/data/traces
 *.log

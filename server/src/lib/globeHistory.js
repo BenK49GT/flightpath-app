@@ -263,15 +263,21 @@ export async function fetchGlobeTracePackForDay(icaoLower, ymd, log = false) {
  * Merges local cache; stops early if ADS-B Exchange keeps returning 429.
  */
 export async function listGlobeDatesWithData(icaoLower, daysBack, delayMs) {
-  const byDate = new Map();
-  for (const row of listLocalTraceDaySummaries(icaoLower)) {
-    byDate.set(row.date, row);
-  }
-
   const now = new Date();
   const startUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   const n = Math.min(Math.max(Number(daysBack) || 90, 1), 3650);
   const wait = Math.min(Math.max(Number(delayMs) || 100, 40), 800);
+  const oldestUtc = startUtc - (n - 1) * 86400000;
+  const inScanWindow = (ymd) => {
+    const t = Date.parse(`${ymd}T00:00:00Z`);
+    return Number.isFinite(t) && t >= oldestUtc && t <= startUtc;
+  };
+
+  const byDate = new Map();
+  for (const row of listLocalTraceDaySummaries(icaoLower)) {
+    if (inScanWindow(row.date)) byDate.set(row.date, row);
+  }
+
   let consecutive429 = 0;
   let remoteHits = 0;
   let daysProbed = 0;
