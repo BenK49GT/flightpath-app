@@ -354,14 +354,22 @@
       try {
         const data = await loadDates(reg, scannedDaysBack, false);
         if (!datesPayload.length) {
-          setStatus("No trace days found in the scanned window for " + data.registration + ".");
+          if (data.rateLimited) {
+            showErr(data.message || "ADS-B Exchange rate-limited (429). Wait a few minutes and retry.");
+            setStatus("Rate limited — no flight days could be loaded.");
+          } else {
+            setStatus("No trace days found in the scanned window for " + data.registration + ".");
+          }
           return;
         }
         renderDatesList();
         datesSection.hidden = false;
         btnLoadMoreDates.hidden = false;
         setStatus(
-          "Found " +
+          (data.rateLimited
+            ? (data.message || "Rate limited — partial list. ") + " "
+            : "") +
+            "Found " +
             datesPayload.length +
             " day(s) with data in last " +
             scannedDaysBack +

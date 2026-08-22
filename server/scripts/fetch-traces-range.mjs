@@ -15,6 +15,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { eachUtcDayInclusive, parseYmdUtc, ymdFromUtcMs } from "../src/lib/dates.js";
+import { fetchGlobeHistoryJson } from "../src/lib/globeHistory.js";
 import { nToHex } from "../src/lib/nnumberLocal.js";
 import { normalizeRawTraceToPoints } from "./traceNormalize.mjs";
 
@@ -36,21 +37,7 @@ function globeHistoryUrl(y, m, d, folder, icao, kind) {
 }
 
 async function fetchJson(url) {
-  const res = await fetch(url, {
-    headers: {
-      accept: "application/json,*/*",
-      "user-agent":
-        "Mozilla/5.0 (compatible; FlightpathIngest/1.0; +https://example.invalid) AppleWebKit/537.36",
-      referer: "https://globe.adsbexchange.com/",
-    },
-  });
-  if (!res.ok) return { ok: false, status: res.status };
-  try {
-    const data = await res.json();
-    return { ok: true, data };
-  } catch {
-    return { ok: false, status: "parse-error" };
-  }
+  return fetchGlobeHistoryJson(url);
 }
 
 async function main() {

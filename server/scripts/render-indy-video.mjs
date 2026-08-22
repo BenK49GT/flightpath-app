@@ -27,7 +27,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { eachUtcDayInclusive, ymdFromUtcMs } from "../src/lib/dates.js";
+import {
+  fetchGlobeTracePackForDay,
+  loadLocalTracePack,
+} from "../src/lib/globeHistory.js";
 import { nToHex } from "../src/lib/nnumberLocal.js";
 import { segmentFlights } from "../src/lib/segment.js";
 import { normalizeRawTraceToPoints } from "./traceNormalize.mjs";
@@ -167,75 +170,28 @@ function revealInFileManager(filePath) {
   }
 }
 
-function globeHistoryUrl(y, m, d, folder, icao, kind) {
-  const ic = icao.toLowerCase();
-  return `https://globe.adsbexchange.com/globe_history/${y}/${m}/${d}/traces/${folder}/${kind}_${ic}.json`;
-}
-
-async function fetchJson(url) {
-  const res = await fetch(url, {
-    headers: {
-      accept: "application/json,*/*",
-      "user-agent":
-        "Mozilla/5.0 (compatible; FlightpathIndyRender/1.2) AppleWebKit/537.36",
-      referer: "https://globe.adsbexchange.com/",
-    },
-  });
-  if (!res.ok) return { ok: false, status: res.status };
-  try {
-    const data = await res.json();
-    return { ok: true, data };
-  } catch {
-    return { ok: false, status: "parse-error" };
+async function resolveTraceForDay(icaoLower, ymd) {
+  const local = loadLocalTracePack(icaoLower, ymd);
+  if (local) {
+    console.error(`Local trace: ${local.path}`);
+    return local;
   }
-}
-
-async function tryScrapeTrace(icaoLower, from, to) {
-  const folder = icaoLower.slice(-2);
-  const dayStarts = eachUtcDayInclusive(from, to);
-  for (const dayMs of dayStarts) {
-    const ymd = ymdFromUtcMs(dayMs);
-    const [y, m, d] = ymd.split("-");
-    for (const kind of ["trace_full", "trace_recent"]) {
-      const url = globeHistoryUrl(y, m, d, folder, icaoLower, kind);
-      process.stderr.write(`Scrape: GET ${url} … `);
-      const { ok, data, status } = await fetchJson(url);
-      if (!ok) {
-        console.error(status);
-        continue;
-      }
-      const points = normalizeRawTraceToPoints(data);
-      if (!points?.length) {
-        console.error("no parseable points");
-        continue;
-      }
-      console.error(`ok → ${points.length} raw points`);
-      return { source: "globe.adsbexchange.com", url, ymd, points };
-    }
-  }
+  const remote = await fetchGlobeTracePackForDay(icaoLower, ymd, true);
+  if (remote?.rateLimited) return remote;
+  if (remote?.points?.length) return remote;
   return null;
 }
 
-async function fetchTraceForDay(icaoLower, ymd) {
-  const folder = icaoLower.slice(-2);
-  const [y, m, d] = ymd.split("-");
-  for (const kind of ["trace_full", "trace_recent"]) {
-    const url = globeHistoryUrl(y, m, d, folder, icaoLower, kind);
-    process.stderr.write(`Scrape: GET ${url} … `);
-    const { ok, data, status } = await fetchJson(url);
-    if (!ok) {
-      console.error(status);
-      continue;
-    }
-    const points = normalizeRawTraceToPoints(data);
-    if (!points?.length) {
-      console.error("no parseable points");
-      continue;
-    }
-    console.error(`ok → ${points.length} raw points`);
-    return { source: "globe.adsbexchange.com", url, ymd, points };
+function dieNoTraceData(sawRateLimit) {
+  if (sawRateLimit) {
+    console.error(
+      "ADS-B Exchange rate limited (429). Wait 1–2 minutes and retry, or cache the day locally:\n" +
+        "  npm run fetch-traces -- --reg N49GT --from YYYY-MM-DD --to YYYY-MM-DD --delay-ms 1200",
+    );
+  } else {
+    console.error("No trace data for that day (not on globe_history or not cached under server/data/traces/).");
   }
-  return null;
+  process.exit(1);
 }
 
 function downsampleByStride(points, maxPoints) {
@@ -246,20 +202,6 @@ function downsampleByStride(points, maxPoints) {
   const last = points[points.length - 1];
   if (out[out.length - 1] !== last) out.push(last);
   return out;
-}
-
-function loadLocalTrace(icaoLower, ymdCompact) {
-  const p = path.join(ROOT, "data", "traces", `${ymdCompact}_${icaoLower}.json`);
-  if (!fs.existsSync(p)) return null;
-  const raw = JSON.parse(fs.readFileSync(p, "utf8"));
-  const points = normalizeRawTraceToPoints(raw);
-  if (!points?.length) return null;
-  return {
-    source: "local-fallback",
-    path: p,
-    ymd: `${ymdCompact.slice(0, 4)}-${ymdCompact.slice(4, 6)}-${ymdCompact.slice(6, 8)}`,
-    points,
-  };
 }
 
 /** Windows drawtext needs drive colon escaped, e.g. C\:/Windows/Fonts/... */
@@ -1267,13 +1209,14 @@ async function main() {
 
   if (multiFlight) {
     let tCursor = 0;
+    let sawRateLimit = false;
     for (const ymd of requestedDates.sort((a, b) => a.localeCompare(b))) {
-      let dayPack = await fetchTraceForDay(icaoLower, ymd);
-      if (!dayPack) {
-        const ymdCompact = ymd.replaceAll("-", "");
-        dayPack = loadLocalTrace(icaoLower, ymdCompact);
+      const dayPack = await resolveTraceForDay(icaoLower, ymd);
+      if (dayPack?.rateLimited) {
+        sawRateLimit = true;
+        continue;
       }
-      if (!dayPack) continue;
+      if (!dayPack?.points?.length) continue;
       if (!pack) pack = dayPack;
 
       const cleanedDay = preprocessRawPoints(dayPack.points);
@@ -1284,10 +1227,7 @@ async function main() {
       tCursor += seg.length + 900;
       points.push(...seg);
     }
-    if (!points.length) {
-      console.error("No trace data for requested dates.");
-      process.exit(1);
-    }
+    if (!points.length) dieNoTraceData(sawRateLimit);
     points = downsampleByStride(points, 1800);
     legMeta = {
       startTimeUnix: points[0]?.t ?? 0,
@@ -1297,25 +1237,10 @@ async function main() {
     usedFullTrace = true;
     flightsFound = requestedDates.length;
   } else {
-    if (DATES.length === 1) {
-      // Single value in --dates: scrape that day (do not fall back to default --from).
-      const singleDay = DATES[0];
-      pack = await tryScrapeTrace(icaoLower, singleDay, singleDay);
-      if (!pack) {
-        const ymdCompact = singleDay.replaceAll("-", "");
-        pack = loadLocalTrace(icaoLower, ymdCompact);
-      }
-    } else {
-      pack = await tryScrapeTrace(icaoLower, FROM, TO);
-      if (!pack) {
-        const ymdCompact = FROM.replaceAll("-", "");
-        pack = loadLocalTrace(icaoLower, ymdCompact);
-      }
-    }
-    if (!pack) {
-      console.error("No trace data.");
-      process.exit(1);
-    }
+    const singleDay = DATES.length === 1 ? DATES[0] : FROM;
+    pack = await resolveTraceForDay(icaoLower, singleDay);
+    if (pack?.rateLimited) dieNoTraceData(true);
+    if (!pack?.points?.length) dieNoTraceData(false);
 
     rawPointCount = pack.points.length;
     const cleaned = preprocessRawPoints(pack.points);

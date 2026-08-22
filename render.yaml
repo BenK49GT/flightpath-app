@@ -11,8 +11,12 @@ services:
         value: production
       - key: PORT
         value: 10000
-      # Tune as needed; smaller values reduce globe-history scan time.
+      # Slower probes reduce ADS-B Exchange 429s between Find dates and Generate.
       - key: INDY_GLOBE_DAYS_BACK
         value: 60
       - key: INDY_GLOBE_DELAY_MS
-        value: 120
+        value: 250
+      - key: INDY_GLOBE_RETRY_MAX
+        value: 2
+      - key: INDY_GLOBE_ABORT_AFTER_429
+        value: 6

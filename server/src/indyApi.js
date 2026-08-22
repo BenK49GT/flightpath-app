@@ -137,17 +137,24 @@ export async function handleIndyDates(reg, query) {
     );
     const delayMs = Math.min(Math.max(Number(query.delayMs) || GLOBE_DELAY_MS, 40), 800);
 
-    const dates = await listGlobeDatesWithData(ac.icao24, daysBack, delayMs);
-    return {
-      status: 200,
-      body: {
-        registration: ac.registration,
-        icao24: ac.icao24,
-        daysScanned: daysBack,
-        dates,
-        source: "globe.adsbexchange.com",
-      },
+    const scan = await listGlobeDatesWithData(ac.icao24, daysBack, delayMs);
+    const body = {
+      registration: ac.registration,
+      icao24: ac.icao24,
+      daysScanned: daysBack,
+      daysProbed: scan.daysProbed,
+      dates: scan.dates,
+      source: "globe.adsbexchange.com",
     };
+    if (scan.rateLimited) {
+      body.rateLimited = true;
+      body.scanStoppedEarly = scan.scanStoppedEarly;
+      body.message =
+        scan.dates.length > 0
+          ? "ADS-B Exchange rate-limited further scanning; showing cached and partial results. Wait a few minutes and try again."
+          : "ADS-B Exchange rate-limited this server (HTTP 429). Wait a few minutes, then retry Find flight dates.";
+    }
+    return { status: 200, body };
   } catch (e) {
     if (e.code === "INVALID_REGISTRATION") {
       return { status: 400, body: { error: e.code, message: e.message } };
