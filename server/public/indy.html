@@ -132,6 +132,22 @@
       color: var(--muted);
       margin-top: 0.4rem;
     }
+    .photos-box {
+      margin-top: 0.85rem;
+      padding-top: 0.75rem;
+      border-top: 1px solid var(--border);
+    }
+    .photos-box label.inline {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      margin: 0.55rem 0 0;
+      max-width: none;
+    }
+    .photos-box input[type="checkbox"] { width: auto; max-width: none; }
+    .btn-row { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+    .btn-row button { margin-top: 0.5rem; }
+    button.secondary { background: #3d3228; }
   </style>
 </head>
 <body>
@@ -168,6 +184,20 @@
         <label>Pick one or more dates</label>
         <div id="datesList" class="dates-list"></div>
         <button type="button" id="btnLoadMoreDates">Load more flights</button>
+        <div id="photosBox" class="photos-box">
+          <label>Google Photos (optional)</label>
+          <p id="photosStatus" class="hint">Not connected.</p>
+          <div class="btn-row">
+            <button type="button" id="btnGoogleConnect">Connect Google Photos</button>
+            <button type="button" id="btnGoogleDisconnect" class="secondary" hidden>Disconnect</button>
+            <button type="button" id="btnPickPhotos" class="secondary" disabled>Add photos from Google Photos</button>
+          </div>
+          <label class="inline">
+            <input type="checkbox" id="filterFlightTime" checked />
+            Only include media during selected flight time
+          </label>
+          <p id="photosPickHint" class="hint"></p>
+        </div>
         <button type="button" id="btnRender" disabled>Generate video</button>
       </div>
       <div id="msg" class="err" hidden></div>
@@ -202,8 +232,16 @@
     const scanBusyText = $("scanBusyText");
     const renderBusy = $("renderBusy");
     const renderBusyText = $("renderBusyText");
+    const photosStatus = $("photosStatus");
+    const btnGoogleConnect = $("btnGoogleConnect");
+    const btnGoogleDisconnect = $("btnGoogleDisconnect");
+    const btnPickPhotos = $("btnPickPhotos");
+    const filterFlightTime = $("filterFlightTime");
+    const photosPickHint = $("photosPickHint");
 
     let selectedDates = new Set();
+    let googlePhotosSessionId = null;
+    let pickedMediaCount = 0;
     let datesPayload = [];
     let scannedDaysBack = 120;
     const DAYS_STEP = 120;
@@ -287,6 +325,137 @@
       btnRender.disabled = selectedDates.size === 0;
     }
 
+    async function refreshGoogleStatus() {
+      try {
+        const res = await fetch("/api/auth/google/status", { cache: "no-store" });
+        const data = await readJsonOrThrow(res, "Google status");
+        if (!data.configured) {
+          photosStatus.textContent = "Google OAuth not configured. See server/GOOGLE_PHOTOS.md";
+          btnGoogleConnect.disabled = true;
+          btnGoogleDisconnect.hidden = true;
+          btnPickPhotos.disabled = true;
+          return;
+        }
+        btnGoogleConnect.disabled = false;
+        if (data.connected) {
+          photosStatus.textContent = data.email
+            ? "Connected as " + data.email
+            : "Google Photos connected.";
+          btnGoogleDisconnect.hidden = false;
+          btnPickPhotos.disabled = false;
+        } else {
+          photosStatus.textContent = "Not connected.";
+          btnGoogleDisconnect.hidden = true;
+          btnPickPhotos.disabled = true;
+        }
+      } catch {
+        photosStatus.textContent = "Could not check Google Photos status.";
+      }
+    }
+
+    async function refreshFlightWindowHint() {
+      const dates = selectedDateListSortedAsc();
+      const reg = regInput.value.trim().toUpperCase();
+      if (!dates.length || !reg.startsWith("N") || !pickedMediaCount) {
+        if (pickedMediaCount) {
+          photosPickHint.textContent = pickedMediaCount + " item(s) selected.";
+        }
+        return;
+      }
+      try {
+        const u = new URL("/api/indy/flight-window", window.location.origin);
+        u.searchParams.set("reg", reg);
+        u.searchParams.set("dates", dates.join(","));
+        const res = await fetch(u.toString(), { cache: "no-store" });
+        const data = await readJsonOrThrow(res, "Flight window");
+        if (data.ok && data.startUnix && data.endUnix) {
+          photosPickHint.textContent =
+            pickedMediaCount +
+            " item(s) selected. Flight window " +
+            new Date(data.startUnix * 1000).toISOString() +
+            " → " +
+            new Date(data.endUnix * 1000).toISOString() +
+            (filterFlightTime.checked ? " (filter on)." : " (filter off).");
+        } else {
+          photosPickHint.textContent =
+            pickedMediaCount + " item(s) selected. No cached trace window for those dates yet.";
+        }
+      } catch {
+        photosPickHint.textContent = pickedMediaCount + " item(s) selected.";
+      }
+    }
+
+    btnGoogleConnect.addEventListener("click", () => {
+      window.location.href = "/api/auth/google/start";
+    });
+
+    btnGoogleDisconnect.addEventListener("click", async () => {
+      try {
+        await fetch("/api/auth/google", { method: "DELETE" });
+        googlePhotosSessionId = null;
+        pickedMediaCount = 0;
+        photosPickHint.textContent = "";
+        await refreshGoogleStatus();
+      } catch (e) {
+        showErr(String(e.message || e));
+      }
+    });
+
+    btnPickPhotos.addEventListener("click", async () => {
+      showErr("");
+      btnPickPhotos.disabled = true;
+      try {
+        const res = await fetch("/api/google-photos/picker/session", { method: "POST" });
+        const data = await readJsonOrThrow(res, "Start photo picker");
+        if (!res.ok) throw new Error(data.message || data.error || res.statusText);
+        googlePhotosSessionId = data.sessionId;
+        const pickerUrl = data.pickerUri;
+        if (!pickerUrl) throw new Error("Picker did not return a URL");
+        const popup = window.open(pickerUrl, "gphotos", "width=920,height=720");
+        photosPickHint.textContent = "Pick photos in the Google window, then return here…";
+        for (let i = 0; i < 180; i++) {
+          await new Promise((r) => setTimeout(r, 1500));
+          const pr = await fetch(
+            "/api/google-photos/picker/session/" + encodeURIComponent(googlePhotosSessionId),
+            { cache: "no-store" },
+          );
+          const st = await readJsonOrThrow(pr, "Picker status");
+          if (st.mediaItemsSet || st.ready) {
+            const ir = await fetch(
+              "/api/google-photos/picker/session/" +
+                encodeURIComponent(googlePhotosSessionId) +
+                "/items",
+              { cache: "no-store" },
+            );
+            const items = await readJsonOrThrow(ir, "Picked items");
+            pickedMediaCount = Number(items.count) || (items.items || []).length;
+            if (popup && !popup.closed) popup.close();
+            await refreshFlightWindowHint();
+            setStatus("Added " + pickedMediaCount + " Google Photos item(s). Generate when ready.");
+            return;
+          }
+        }
+        throw new Error("Timed out waiting for Google Photos selection.");
+      } catch (e) {
+        showErr(String(e.message || e));
+      } finally {
+        btnPickPhotos.disabled = false;
+        refreshGoogleStatus();
+      }
+    });
+
+    filterFlightTime.addEventListener("change", () => {
+      refreshFlightWindowHint();
+    });
+
+    refreshGoogleStatus();
+    const bootParams = new URLSearchParams(window.location.search);
+    if (bootParams.get("connected") === "1") {
+      setStatus("Google Photos connected.");
+    } else if (bootParams.get("connected") === "0") {
+      showErr("Google Photos connect failed: " + (bootParams.get("error") || "unknown"));
+    }
+
     function renderDatesList() {
       datesList.innerHTML = "";
       for (const d of datesPayload) {
@@ -312,6 +481,7 @@
           else selectedDates.add(d.date);
           renderDatesList();
           updateRenderButtonState();
+          refreshFlightWindowHint();
         });
         datesList.appendChild(b);
       }
@@ -434,11 +604,18 @@
         const res = await fetch("/api/indy/render", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(
-            dates.length === 1
-              ? { reg, date: dates[0], leg: "longest", mapType, resolution }
-              : { reg, dates, leg: "longest", mapType, resolution },
-          ),
+          body: JSON.stringify({
+            ...(dates.length === 1 ? { reg, date: dates[0] } : { reg, dates }),
+            leg: "longest",
+            mapType,
+            resolution,
+            ...(googlePhotosSessionId
+              ? {
+                  googlePhotosSessionId,
+                  filterMediaByFlightTime: Boolean(filterFlightTime.checked),
+                }
+              : {}),
+          }),
         });
         const data = await readJsonOrThrow(res, "Start render");
         if (res.status === 402) throw new Error(data.message || "Selected resolution requires paid tier");

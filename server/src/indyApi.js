@@ -4,8 +4,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { lookupAircraft, normalizeReg } from "./lib/regLookup.js";
+import { downloadPickedMedia, getSessionMediaDir, isSafeSessionId } from "./googlePhotosPicker.js";
 import { listGlobeDatesWithData } from "./lib/globeHistory.js";
+import { lookupAircraft, normalizeReg } from "./lib/regLookup.js";
+import { buildMediaManifest, computeFlightWindowFromDates } from "./mediaManifest.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SERVER_ROOT = path.join(__dirname, "..");
@@ -30,7 +32,28 @@ function jobVideoPath(jobId) {
   return path.join(SERVER_ROOT, "output", `${base}.mp4`);
 }
 
-function launchRenderJob(jobId) {
+async function prepareMediaForJob(j) {
+  if (!j.googlePhotosSessionId) return null;
+  if (!isSafeSessionId(j.googlePhotosSessionId)) {
+    throw new Error("Invalid Google Photos session id");
+  }
+  const destDir = getSessionMediaDir(j.googlePhotosSessionId);
+  const downloaded = await downloadPickedMedia(j.googlePhotosSessionId, destDir);
+  const win = computeFlightWindowFromDates(j.icao24, j.dates);
+  const manifest = buildMediaManifest({
+    items: downloaded,
+    startUnix: win.startUnix,
+    endUnix: win.endUnix,
+    filterByFlightTime: j.filterMediaByFlightTime !== false,
+  });
+  const manifestPath = path.join(destDir, "manifest.json");
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+  j.mediaIncluded = manifest.includedCount;
+  j.mediaPicked = manifest.pickedCount;
+  return manifest.includedCount ? manifestPath : null;
+}
+
+async function launchRenderJob(jobId) {
   const j = jobs.get(jobId);
   if (!j) return;
 
@@ -38,6 +61,18 @@ function launchRenderJob(jobId) {
   j.status = "running";
   j.startedAt = Date.now();
   j.error = null;
+
+  let mediaManifestPath = null;
+  try {
+    mediaManifestPath = await prepareMediaForJob(j);
+  } catch (err) {
+    j.status = "error";
+    j.finishedAt = Date.now();
+    j.error = err.message || String(err);
+    if (activeJobId === jobId) activeJobId = null;
+    processQueue();
+    return;
+  }
 
   const scriptPath = path.join(SERVER_ROOT, "scripts", "render-indy-video.mjs");
   const child = spawn(
@@ -61,6 +96,7 @@ function launchRenderJob(jobId) {
       "--duration-sec",
       String(j.durationSec || 14),
       ...(j.multiFlight ? ["--cinematic-zoom-out"] : []),
+      ...(mediaManifestPath ? ["--media-manifest", mediaManifestPath] : []),
     ],
     {
       cwd: SERVER_ROOT,
@@ -235,9 +271,17 @@ export async function handleIndyRender(body) {
 
     const jobId = crypto.randomUUID();
     const outputBase = `indy_web_${jobId}`;
+    const googlePhotosSessionId = body?.googlePhotosSessionId
+      ? String(body.googlePhotosSessionId)
+      : null;
+    if (googlePhotosSessionId && !isSafeSessionId(googlePhotosSessionId)) {
+      return { status: 400, body: { error: "BAD_REQUEST", message: "Invalid googlePhotosSessionId" } };
+    }
+
     jobs.set(jobId, {
       status: "queued",
       registration: ac.registration,
+      icao24: ac.icao24,
       date: String(uniqueDates[0]),
       dates: uniqueDates,
       multiFlight,
@@ -245,6 +289,8 @@ export async function handleIndyRender(body) {
       leg,
       mapType,
       resolution,
+      googlePhotosSessionId,
+      filterMediaByFlightTime: body?.filterMediaByFlightTime !== false,
       error: null,
       outputBase,
       createdAt: Date.now(),
@@ -302,4 +348,47 @@ export async function handleIndyJob(jobId) {
   if (j.status === "queued") body.queuePosition = Math.max(0, pendingJobIds.indexOf(jobId)) + 1;
   if (j.error) body.error = j.error;
   return { status: 200, body };
+}
+
+export async function handleIndyFlightWindow(reg, query) {
+  try {
+    if (!reg) {
+      return {
+        status: 400,
+        body: { error: "BAD_REQUEST", message: "Query param `reg` (N-number) is required" },
+      };
+    }
+    const datesRaw = String(query?.dates || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!datesRaw.length || datesRaw.some((d) => !/^\d{4}-\d{2}-\d{2}$/.test(d))) {
+      return {
+        status: 400,
+        body: { error: "BAD_REQUEST", message: "`dates` must be comma-separated YYYY-MM-DD values" },
+      };
+    }
+    const registration = normalizeReg(String(reg));
+    const ac = lookupAircraft(registration);
+    const uniqueDates = Array.from(new Set(datesRaw)).sort((a, b) => a.localeCompare(b));
+    const win = computeFlightWindowFromDates(ac.icao24, uniqueDates);
+    return {
+      status: 200,
+      body: {
+        registration: ac.registration,
+        icao24: ac.icao24,
+        dates: uniqueDates,
+        datesWithCache: win.dates,
+        startUnix: win.startUnix,
+        endUnix: win.endUnix,
+        ok: win.ok,
+      },
+    };
+  } catch (e) {
+    if (e.code === "INVALID_REGISTRATION") {
+      return { status: 400, body: { error: e.code, message: e.message } };
+    }
+    console.error(e);
+    return { status: 500, body: { error: "INTERNAL", message: "Unexpected server error" } };
+  }
 }

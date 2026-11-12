@@ -38,6 +38,10 @@ If you **have not** run `npm install`, `npm start` still works: it serves the sa
 
 The API listens on **`0.0.0.0:8787`** so other devices on your LAN can reach it.
 
+### Google Photos overlays (local trial)
+
+Optional: overlay photos/videos from Google Photos on Indy map videos, timed to the flight. See [`server/GOOGLE_PHOTOS.md`](server/GOOGLE_PHOTOS.md).
+
 ### Free hosting (Render)
 
 This repo includes `render.yaml` + `server/Dockerfile` to deploy the API with ffmpeg on Render's free web tier.

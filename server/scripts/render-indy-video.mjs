@@ -11,7 +11,8 @@
  *   node scripts/render-indy-video.mjs [--reg N49GT] [--from YYYY-MM-DD] [--to YYYY-MM-DD]
  *        [--leg longest|first|0|1|…] [--open] [--audio path/to/track.m4a|mp3|wav] [--no-music]
  *        [--output-basename indy_flight] [--map-type osm|vfr|ifr] [--max-view-miles 100]
- *        [--resolution 480p|720p|1080p|1440p] [--credits-sec 5]
+ *        [--resolution 480p|720p|1080p|1440p] [--credits-sec 5] [--static-camera|--overview]
+ *        [--media-manifest path/to/manifest.json]
  *
  * --open      Windows: Explorer with the MP4 selected (paths in chat are often not clickable).
  * --audio     Mux your own file instead of the default underscore (you must have rights to use it).
@@ -31,6 +32,7 @@ import {
   fetchGlobeTracePackForDay,
   loadLocalTracePack,
 } from "../src/lib/globeHistory.js";
+import { absoluteUnixForDay, scheduleMediaOverlays } from "../src/mediaManifest.js";
 import { nToHex } from "../src/lib/nnumberLocal.js";
 import { segmentFlights } from "../src/lib/segment.js";
 import { normalizeRawTraceToPoints } from "./traceNormalize.mjs";
@@ -81,7 +83,11 @@ const DATES = String(DATES_ARG || "")
   .filter(Boolean);
 const LEG = (arg("--leg", "longest") || "longest").toLowerCase();
 const CINEMATIC_ZOOM_OUT = process.argv.includes("--cinematic-zoom-out");
+/** Force full-route framing (no follow-cam punch-in), even when the path is very wide. */
+const FORCE_STATIC_CAMERA =
+  process.argv.includes("--static-camera") || process.argv.includes("--overview");
 const OPEN_IN_OS = process.argv.includes("--open");
+const MEDIA_MANIFEST_PATH = arg("--media-manifest", "");
 const AUDIO_ARG = arg("--audio", null);
 const AUDIO_PATH = AUDIO_ARG ? String(AUDIO_ARG).trim() : null;
 const MAP_TYPE = (arg("--map-type", "osm") || "osm").trim().toLowerCase();
@@ -549,10 +555,24 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/** Minimal valid 1×1 PNG (parchment gray); mosaic scales each tile to 256×256. */
+const PLACEHOLDER_TILE_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  "base64",
+);
+
+function writePlaceholderTilePng(destPath) {
+  fs.writeFileSync(destPath, PLACEHOLDER_TILE_PNG);
+}
+
 async function fetchOsmTile(z, x, y, destPath) {
   const host = TILE_HOSTS[(x + y + z) % TILE_HOSTS.length];
   const url = `https://${host}.tile.openstreetmap.org/${z}/${x}/${y}.png`;
   const res = await fetch(url, { headers: { "user-agent": OSM_UA, Accept: "image/png,*/*" } });
+  if (res.status === 404) {
+    writePlaceholderTilePng(destPath);
+    return;
+  }
   if (!res.ok) throw new Error(`tile ${z}/${x}/${y}: HTTP ${res.status}`);
   fs.writeFileSync(destPath, Buffer.from(await res.arrayBuffer()));
 }
@@ -567,6 +587,11 @@ async function fetchChartTile(mapType, z, x, y, destPath) {
       referer: "https://www.arcgis.com/",
     },
   });
+  // FAA chart services 404 outside CONUS / water / no-coverage tiles — do not abort the render.
+  if (res.status === 404) {
+    writePlaceholderTilePng(destPath);
+    return;
+  }
   if (!res.ok) throw new Error(`tile ${z}/${x}/${y}: HTTP ${res.status}`);
   fs.writeFileSync(destPath, Buffer.from(await res.arrayBuffer()));
 }
@@ -632,13 +657,24 @@ async function buildBasemapPng(ffmpeg, bounds, zIn, outPngPath, tileDir, mapType
   console.error(`${mapSource.label} tile grid ${nCols}x${nRows} at zoom ${z} (${nCols * nRows} tiles)`);
 
   const tilePaths = [];
+  let missingTiles = 0;
   for (let ty = ty0; ty <= ty1; ty++) {
     for (let tx = tx0; tx <= tx1; tx++) {
       const fp = path.join(tileDir, `t_${z}_${tx}_${ty}.png`);
-      await fetchMapTile(mapType, z, tx, ty, fp);
+      try {
+        await fetchMapTile(mapType, z, tx, ty, fp);
+      } catch (err) {
+        // Transient tile errors: keep going with a blank so long multi-day charts still encode.
+        missingTiles += 1;
+        console.error(`tile ${z}/${tx}/${ty}: ${err.message || err} — blank placeholder`);
+        writePlaceholderTilePng(fp);
+      }
       await sleep(mapType === "osm" ? 85 : 25);
       tilePaths.push(fp);
     }
+  }
+  if (missingTiles) {
+    console.error(`Basemap: ${missingTiles} missing/failed tile(s) filled with placeholders.`);
   }
 
   const LARGE_TILE_GRID = 140;
@@ -774,6 +810,74 @@ function blendPx(buf, x, y, r, g, b, a) {
   buf[i] = Math.round(buf[i] * (1 - a) + r * a);
   buf[i + 1] = Math.round(buf[i + 1] * (1 - a) + g * a);
   buf[i + 2] = Math.round(buf[i + 2] * (1 - a) + b * a);
+}
+
+function extractStillWithFfmpeg(ffmpeg, src, destPng) {
+  const r = spawnSync(ffmpeg, ["-y", "-i", src, "-frames:v", "1", destPng], { stdio: "ignore" });
+  return r.status === 0 && fs.existsSync(destPng);
+}
+
+function loadSlideshowAssets(ffmpeg, manifest, totalFrames) {
+  if (!manifest?.items?.length) return [];
+  const pipW = Math.max(160, Math.round(W * 0.38));
+  const pipH = Math.max(120, Math.round(H * 0.38));
+  const scheduled = scheduleMediaOverlays(manifest, { totalFrames, fps: FPS });
+  const out = [];
+  for (const slot of scheduled) {
+    let src = slot.path;
+    if (!src || !fs.existsSync(src)) continue;
+    if (slot.type === "video") {
+      const still = `${src}.still.png`;
+      if (!extractStillWithFfmpeg(ffmpeg, src, still)) continue;
+      src = still;
+    }
+    let rgb;
+    try {
+      rgb = readPngRgbWithFfmpeg(ffmpeg, src, pipW, pipH);
+    } catch {
+      const tmp = `${src}.rgb.png`;
+      const conv = spawnSync(ffmpeg, ["-y", "-i", src, tmp], { stdio: "ignore" });
+      if (conv.status !== 0 || !fs.existsSync(tmp)) continue;
+      try {
+        rgb = readPngRgbWithFfmpeg(ffmpeg, tmp, pipW, pipH);
+      } catch {
+        continue;
+      }
+    }
+    out.push({ ...slot, rgb, w: pipW, h: pipH });
+  }
+  console.error(`Slideshow overlays: ${out.length} media item(s) scheduled.`);
+  return out;
+}
+
+function overlayAlpha(frame, start, end) {
+  const fade = 8;
+  if (frame < start || frame >= end) return 0;
+  const into = frame - start;
+  const out = end - 1 - frame;
+  if (into < fade) return 0.9 * (into / fade);
+  if (out < fade) return 0.9 * (Math.max(0, out) / fade);
+  return 0.9;
+}
+
+function drawSlideshowCard(buf, item, frame) {
+  const a = overlayAlpha(frame, item.startFrame, item.endFrame);
+  if (a <= 0.01) return;
+  const dx = W - item.w - Math.max(36, Math.round(W * 0.04));
+  const dy = Math.max(40, Math.round((H - item.h) / 2));
+  const pad = 8;
+  for (let y = -pad; y < item.h + pad; y++) {
+    for (let x = -pad; x < item.w + pad; x++) {
+      const edge = x < 0 || y < 0 || x >= item.w || y >= item.h;
+      if (edge) blendPx(buf, dx + x, dy + y, 32, 22, 16, a * 0.72);
+    }
+  }
+  for (let y = 0; y < item.h; y++) {
+    for (let x = 0; x < item.w; x++) {
+      const si = (y * item.w + x) * 3;
+      blendPx(buf, dx + x, dy + y, item.rgb[si], item.rgb[si + 1], item.rgb[si + 2], a);
+    }
+  }
 }
 
 function drawSoftSegment(buf, x0, y0, x1, y1, r, g, b, thickness, alpha) {
@@ -1143,6 +1247,7 @@ function renderFrame(
   cameraViews,
   grainStrength,
   styleProfile,
+  slideshowItems,
 ) {
   const n = points.length;
   const upto = Math.max(1, Math.min(n, Math.floor(progress * (n - 1)) + 1));
@@ -1165,6 +1270,11 @@ function renderFrame(
   const headXY = worldToScreen(head.lat, head.lon, z, activeView);
   const planeH = resolvePlaneHeadingDeg(points, upto, head, headXY, z, activeView);
   drawPlaneIcon(buf, headXY.x, headXY.y, planeH);
+
+  if (slideshowItems?.length) {
+    const active = slideshowItems.find((it) => frame >= it.startFrame && frame < it.endFrame);
+    if (active) drawSlideshowCard(buf, active, frame);
+  }
 
   drawVintageMapBorder(buf);
   if (styleProfile.speckle) applyPaperSpeckle(buf, frame);
@@ -1223,7 +1333,11 @@ async function main() {
       cleanedCount += cleanedDay.length;
       rawPointCount += dayPack.points.length;
       const pick = selectFlightLeg(cleanedDay, LEG);
-      const seg = pick.points.map((p, i) => ({ ...p, t: tCursor + i }));
+      const seg = pick.points.map((p, i) => ({
+        ...p,
+        originalT: p.originalT ?? absoluteUnixForDay(ymd, p.t) ?? p.t,
+        t: tCursor + i,
+      }));
       tCursor += seg.length + 900;
       points.push(...seg);
     }
@@ -1247,7 +1361,10 @@ async function main() {
     cleanedCount = cleaned.length;
     console.error(`Cleaned ${rawPointCount} → ${cleaned.length} points (kinematic + dedupe).`);
     const legPick = selectFlightLeg(cleaned, LEG);
-    points = legPick.points;
+    points = legPick.points.map((p) => ({
+      ...p,
+      originalT: p.originalT ?? absoluteUnixForDay(singleDay, p.t) ?? p.t,
+    }));
     ({ legMeta, legIndex, flightsFound } = legPick);
     usedFullTrace = points.length === cleaned.length;
   }
@@ -1326,9 +1443,12 @@ async function main() {
   }
 
   const viewRect = { x0: view.x0, x1: view.x1, y0: view.y0, y1: view.y1 };
-  const followEnabled = shouldUseFollowCamera(viewRect, zUsed, effectiveMaxViewMiles);
+  const followEnabled =
+    !FORCE_STATIC_CAMERA && shouldUseFollowCamera(viewRect, zUsed, effectiveMaxViewMiles);
   if (followEnabled) {
     console.error(`Follow camera enabled (max view ${effectiveMaxViewMiles} miles).`);
+  } else if (FORCE_STATIC_CAMERA) {
+    console.error("Static camera forced (--static-camera / --overview): full path in frame.");
   } else {
     console.error(`Static camera used (full leg fits within ${effectiveMaxViewMiles} miles).`);
   }
@@ -1364,6 +1484,22 @@ async function main() {
       ? { gradeMix: 0.62, gradeSat: 0.58, vignetteStrength: 0.38, speckle: true }
       : { gradeMix: 0.26, gradeSat: 0.8, vignetteStrength: 0.14, speckle: false };
 
+  let slideshowItems = [];
+  if (MEDIA_MANIFEST_PATH) {
+    const mp = path.resolve(MEDIA_MANIFEST_PATH);
+    if (fs.existsSync(mp)) {
+      const manifest = JSON.parse(fs.readFileSync(mp, "utf8"));
+      const origTs = points.map((p) => Number(p.originalT)).filter(Number.isFinite);
+      if (origTs.length && (!Number.isFinite(manifest.legStartUnix) || !Number.isFinite(manifest.legEndUnix))) {
+        manifest.legStartUnix = Math.min(...origTs);
+        manifest.legEndUnix = Math.max(...origTs);
+      }
+      slideshowItems = loadSlideshowAssets(ffmpeg, manifest, totalFrames);
+    } else {
+      console.error(`--media-manifest not found: ${mp}`);
+    }
+  }
+
   for (let f = 0; f < totalFrames; f++) {
     const t = f / denom;
     const progress = 0.04 + t * 0.96;
@@ -1382,6 +1518,7 @@ async function main() {
       cameraViews,
       grainStrength,
       styleProfile,
+      slideshowItems,
     );
     const ppmPath = path.join(FRAMES_DIR, `frame_${String(f + 1).padStart(4, "0")}.ppm`);
     const header = Buffer.from(`P6\n${W} ${H}\n255\n`);

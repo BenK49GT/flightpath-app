@@ -10,8 +10,20 @@ import {
   handleTrack,
 } from "./apiHandlers.js";
 import {
+  handleGoogleAuthCallback,
+  handleGoogleAuthDisconnect,
+  handleGoogleAuthStart,
+  handleGoogleAuthStatus,
+} from "./googleAuth.js";
+import {
+  handleCreatePickerSession,
+  handleGetPickerSession,
+  handleListPickerItems,
+} from "./googlePhotosPicker.js";
+import {
   getIndyVideoAbsolutePath,
   handleIndyDates,
+  handleIndyFlightWindow,
   handleIndyJob,
   handleIndyRender,
 } from "./indyApi.js";
@@ -60,6 +72,46 @@ app.get("/api/aircraft/:reg/flights/:flightId/track", async (req, res) => {
 
 app.get("/indy", (_req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, "indy.html"));
+});
+
+function sendHandlerResult(res, result) {
+  if (result.redirect) {
+    res.redirect(result.status || 302, result.redirect);
+    return;
+  }
+  res.status(result.status).json(result.body);
+}
+
+app.get("/api/auth/google/start", (req, res) => {
+  sendHandlerResult(res, handleGoogleAuthStart());
+});
+
+app.get("/api/auth/google/callback", async (req, res) => {
+  sendHandlerResult(res, await handleGoogleAuthCallback(req.query));
+});
+
+app.get("/api/auth/google/status", (_req, res) => {
+  sendHandlerResult(res, handleGoogleAuthStatus());
+});
+
+app.delete("/api/auth/google", (_req, res) => {
+  sendHandlerResult(res, handleGoogleAuthDisconnect());
+});
+
+app.post("/api/google-photos/picker/session", async (_req, res) => {
+  sendHandlerResult(res, await handleCreatePickerSession());
+});
+
+app.get("/api/google-photos/picker/session/:id", async (req, res) => {
+  sendHandlerResult(res, await handleGetPickerSession(req.params.id));
+});
+
+app.get("/api/google-photos/picker/session/:id/items", async (req, res) => {
+  sendHandlerResult(res, await handleListPickerItems(req.params.id));
+});
+
+app.get("/api/indy/flight-window", async (req, res) => {
+  sendHandlerResult(res, await handleIndyFlightWindow(req.query.reg, req.query));
 });
 
 app.get("/api/indy/dates", async (req, res) => {

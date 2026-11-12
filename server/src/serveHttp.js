@@ -15,8 +15,20 @@ import {
   handleTrack,
 } from "./apiHandlers.js";
 import {
+  handleGoogleAuthCallback,
+  handleGoogleAuthDisconnect,
+  handleGoogleAuthStart,
+  handleGoogleAuthStatus,
+} from "./googleAuth.js";
+import {
+  handleCreatePickerSession,
+  handleGetPickerSession,
+  handleListPickerItems,
+} from "./googlePhotosPicker.js";
+import {
   getIndyVideoAbsolutePath,
   handleIndyDates,
+  handleIndyFlightWindow,
   handleIndyJob,
   handleIndyRender,
 } from "./indyApi.js";
@@ -28,7 +40,7 @@ const PORT = Number(process.env.PORT || 8787);
 
 const JSON_CORS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type",
   "Content-Type": "application/json; charset=utf-8",
 };
@@ -70,6 +82,33 @@ function route(req) {
 
   if (req.method === "GET" && pathname === "/indy") {
     return { kind: "static", filePath: path.join(PUBLIC_DIR, "indy.html"), contentType: "text/html; charset=utf-8" };
+  }
+
+  if (req.method === "GET" && pathname === "/api/auth/google/start") {
+    return { kind: "handler", fn: () => handleGoogleAuthStart() };
+  }
+  if (req.method === "GET" && pathname === "/api/auth/google/callback") {
+    return { kind: "handler", fn: () => handleGoogleAuthCallback(query) };
+  }
+  if (req.method === "GET" && pathname === "/api/auth/google/status") {
+    return { kind: "handler", fn: () => handleGoogleAuthStatus() };
+  }
+  if (req.method === "DELETE" && pathname === "/api/auth/google") {
+    return { kind: "handler", fn: () => handleGoogleAuthDisconnect() };
+  }
+  if (req.method === "POST" && pathname === "/api/google-photos/picker/session") {
+    return { kind: "handler", fn: () => handleCreatePickerSession() };
+  }
+  const mPickerItems = /^\/api\/google-photos\/picker\/session\/([^/]+)\/items$/.exec(pathname);
+  if (req.method === "GET" && mPickerItems) {
+    return { kind: "handler", fn: () => handleListPickerItems(decodeURIComponent(mPickerItems[1])) };
+  }
+  const mPicker = /^\/api\/google-photos\/picker\/session\/([^/]+)$/.exec(pathname);
+  if (req.method === "GET" && mPicker) {
+    return { kind: "handler", fn: () => handleGetPickerSession(decodeURIComponent(mPicker[1])) };
+  }
+  if (req.method === "GET" && pathname === "/api/indy/flight-window") {
+    return { kind: "handler", fn: () => handleIndyFlightWindow(query.reg, query) };
   }
 
   if (req.method === "GET" && pathname === "/api/indy/dates") {
@@ -202,7 +241,16 @@ export function start() {
     }
 
     try {
-      const { status, body } = await match.fn();
+      const result = await match.fn();
+      if (result.redirect) {
+        res.writeHead(result.status || 302, {
+          Location: result.redirect,
+          "Access-Control-Allow-Origin": "*",
+        });
+        res.end();
+        return;
+      }
+      const { status, body } = result;
       const pathnameOnly = new URL(req.url || "/", "http://localhost").pathname;
       const headers =
         pathnameOnly === "/api/indy/dates"

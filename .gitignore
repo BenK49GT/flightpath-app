@@ -5,6 +5,12 @@ dist/
 *.log
 .env
 .env.*
+!.env.example
+!server/.env.example
+
+# Google Photos trial tokens and downloaded media (local only)
+server/data/oauth-tokens.json
+server/data/media/
 
 # Bundled CC-BY music is committed with attribution in server/assets/indy-default-music/
 
